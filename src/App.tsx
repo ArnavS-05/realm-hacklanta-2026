@@ -1,47 +1,1087 @@
-import { useEffect,useRef,useState,Suspense,lazy,Component,type ReactNode } from 'react';
-import { ArrowUpRight,ArrowRight,Upload,Scan,Layers,Camera,MoveUpRight,RotateCcw,Pause,Play,Box,Activity,ChevronRight,Sparkles,HelpCircle,X,Check,Command,Download } from 'lucide-react';
-import { motion,AnimatePresence } from 'framer-motion';
-import { demoScene,demoPlan } from './demo';
-import { Controller,LIMITS } from './robotics';
-import { SceneSchema,PlanSchema,validateScene,validatePlan,type Scene,type Plan } from './schema';
-import { Vision } from './Vision';
-const World=lazy(()=>import('./World').then(m=>({default:m.World})));
-class CanvasBoundary extends Component<{children:ReactNode},{failed:boolean}>{state={failed:false};static getDerivedStateFromError(){return {failed:true};}render(){return this.state.failed?<div className="canvas-failure">3D graphics could not start. Enable hardware acceleration in your browser, then reload.</div>:this.props.children;}}
-async function api(path:string,body:unknown){const response=await fetch('/api/'+path,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body),signal:AbortSignal.timeout(30000)});const result=await response.json();if(!response.ok)throw Error(result.error||'Request failed');return result;}
-export default function App(){
- const [entered,setEntered]=useState(false),[scene,setScene]=useState<Scene>(demoScene),[controller,setController]=useState(()=>new Controller(demoScene)),[selected,setSelected]=useState('bottle_01'),[view,setView]=useState('twin'),[image,setImage]=useState(''),[source,setSource]=useState('DEMO SCENE'),[capture,setCapture]=useState(false),[busy,setBusy]=useState(''),[notice,setNotice]=useState(''),[plan,setPlan]=useState<Plan|null>(null),[planSource,setPlanSource]=useState(''),[goal,setGoal]=useState('Place the bottle beside the cup'),[mode,setMode]=useState('manual'),[explanation,setExplanation]=useState(''),[help,setHelp]=useState(false),[connected,setConnected]=useState(false),[pointer,setPointer]=useState(false),[revision,refresh]=useState(0),[sceneKey,setSceneKey]=useState(0);
- const file=useRef<HTMLInputElement>(null),currentRequest=useRef(0);const update=()=>refresh(n=>n+1);const a=controller.arms[1],object=scene.objects.find(o=>o.id===selected),metrics=controller.metrics;
- useEffect(()=>{fetch('/api/health').then(r=>r.json()).then(r=>setConnected(Boolean(r.geminiConfigured))).catch(()=>{});},[]);
- useEffect(()=>{const handler=(event:KeyboardEvent)=>{if(event.target instanceof HTMLInputElement||event.target instanceof HTMLTextAreaElement)return;if(event.code==='Space'){event.preventDefault();controller.stop();update();}if(pointer&&['ArrowLeft','ArrowRight','ArrowUp','ArrowDown','KeyQ','KeyE','KeyG'].includes(event.code)){event.preventDefault();const arm=controller.arms[1],p=[...arm.target] as [number,number,number];if(event.code==='ArrowLeft')p[0]-=.04;if(event.code==='ArrowRight')p[0]+=.04;if(event.code==='ArrowUp')p[1]+=.04;if(event.code==='ArrowDown')p[1]-=.04;if(event.code==='KeyQ')p[2]-=.04;if(event.code==='KeyE')p[2]+=.04;controller.setTarget(1,p,event.code==='KeyG'?!arm.closed:arm.closed);update();}};window.addEventListener('keydown',handler);return()=>window.removeEventListener('keydown',handler);},[controller,pointer]);
- function loadScene(next:Scene,origin:string){setScene(next);setController(new Controller(next));setSelected(next.objects[0]?.id||'');setSource(origin);setPlan(null);setPlanSource('');setSceneKey(k=>k+1);setEntered(true);setCapture(false);setNotice('REALM GENERATED · '+next.objects.length+' objects grounded');}
- function demo(){currentRequest.current++;setBusy('');setImage('');loadScene(demoScene,'DEMO SCENE');}
- function reset(all=false){currentRequest.current++;setBusy('');if(all){setController(new Controller(scene));setSceneKey(k=>k+1);}else{const c=new Controller(scene);c.positions=structuredClone(controller.positions);setController(c);setSceneKey(k=>k+1);}setPlan(null);setNotice(all?'Realm reset':'Robot reset');}
- async function upload(f:File|undefined){if(!f)return;if(!['image/jpeg','image/png','image/webp'].includes(f.type)){setNotice('Choose a JPEG, PNG or WebP image.');return;}if(f.size>15*1024*1024){setNotice('Choose an image smaller than 15 MB.');return;}const url=URL.createObjectURL(f);try{const im=new Image();im.src=url;await im.decode();const cv=document.createElement('canvas'),scale=Math.min(1,1400/Math.max(im.width,im.height));cv.width=im.width*scale;cv.height=im.height*scale;cv.getContext('2d')!.drawImage(im,0,0,cv.width,cv.height);setImage(cv.toDataURL('image/jpeg',.86));setCapture(true);setNotice('');}catch{setNotice('This image could not be read.');}finally{URL.revokeObjectURL(url);}}
- async function analyze(){const token=++currentRequest.current;setBusy('Analyzing environment');try{const result=validateScene(SceneSchema.parse(await api('analyze-scene',{image})));if(token!==currentRequest.current)return;loadScene(result,'GEMINI SCENE');setView('split');}catch(e){if(token===currentRequest.current)setNotice((e as Error).message);}finally{if(token===currentRequest.current)setBusy('');}}
- function context(){return {scene,robotState:{endEffector:a.end,joints:a.joints,gripper:a.closed?'closed':'open',status:a.status},constraints:{reach:LIMITS.reach,maxVelocity:LIMITS.maxVelocity,maxAcceleration:LIMITS.maxAcceleration}};}
- async function planMission(){const token=++currentRequest.current;setBusy('Gemini is planning');try{const p=validatePlan(PlanSchema.parse(await api('plan-mission',{...context(),userGoal:goal})),scene);if(token===currentRequest.current){setPlan(p);setPlanSource('GEMINI');}}catch(e){if(token===currentRequest.current)setNotice((e as Error).message);}finally{if(token===currentRequest.current)setBusy('');}}
- async function explain(){setBusy('Explaining motion');try{const r=await api('explain-action',{...context(),action:`${controller.plan?.steps[controller.stepIndex]?.action||'manual reach'}; target ${a.target.join(',')}; result ${a.status}`});setExplanation(r.explanation);}catch(e){setNotice((e as Error).message);setExplanation(`LOCAL CONSTRAINT CHECK: ${a.status}. The controller checks reach, joint limits and swept arm geometry before moving. Raise the target above the workbench before reaching forward.`);}finally{setBusy('');}}
- const efficiency=metrics.path>0?Math.min(100,Math.round(metrics.ideal/metrics.path*100)):0,score=Math.max(0,Math.round(100-metrics.collisions*8-metrics.limits*3-metrics.corrections*2-(100-efficiency)*.15));
- const world=<CanvasBoundary><Suspense fallback={<div className="loading">Building your realm…</div>}><World key={sceneKey} controller={controller} selected={selected} onSelect={setSelected} onUpdate={update} landing={!entered}/></Suspense></CanvasBoundary>;
- return <div className={entered?'app laboratory':'app landing'}>
- <header><button className="brand" onClick={()=>setEntered(false)} aria-label="REALM home"><img src="/realm.svg" alt=""/>REALM<span>EMBODIED REALITY</span></button><div className="header-center">HACKLANTA 2026 <span>/</span> EXPERIMENT 001</div><button className="header-link" onClick={()=>setHelp(true)}>How it works <ArrowUpRight size={14}/></button></header>
- {!entered?<main className="landing-main"><div className="hero-copy"><motion.div initial={{opacity:0,y:20}} animate={{opacity:1,y:0}} transition={{duration:.7}}><div className="eyebrow"><span className="dot"/> REALITY IS JUST THE BEGINNING</div><h1>Turn reality into<br/>a robotics<br/><em>playground.</em></h1><p>One photograph. A new world.<br/>Use your hands to become the robot inside it.</p><div className="hero-actions"><button className="primary large" onClick={()=>{setEntered(true);setCapture(true);}}>Enter Realm <ArrowUpRight size={18}/></button><button className="text-button" onClick={demo}>Explore the demo <ArrowRight size={16}/></button></div><div className="hero-detail"><span><Scan size={14}/> Computer vision</span><span><Sparkles size={14}/> Gemini reasoning</span><span><Box size={14}/> Real physics</span></div></motion.div></div><div className="hero-world">{world}<div className="world-index"><span className="dot"/> LIVE SIMULATION <span>01 / REALM</span></div><div className="hero-caption"><span>YOU DON'T CONTROL THE ROBOT.</span><strong>You become the robot.</strong></div><div className="coordinates">X 0.231 &nbsp; Y 1.380 &nbsp; Z −0.012<br/>SEMANTIC DIGITAL TWIN / DEMO</div></div><footer className="landing-footer"><span>REAL WORLD <ChevronRight/> DIGITAL TWIN <ChevronRight/> HUMAN MOTION <ChevronRight/> ROBOT ACTION</span><span>BUILT TO BE EXPERIENCED <MoveUpRight size={15}/></span></footer></main>:<>
- <div className="workspace-bar"><div><span className="dot"/><strong>{scene.sceneType}</strong><span className="pill">{source}</span></div><div className="toolbar"><button onClick={()=>setCapture(true)}><Upload size={14}/> Capture reality</button><button onClick={demo}>Load demo realm</button><button aria-label="Instructions" onClick={()=>setHelp(true)}><HelpCircle size={16}/></button></div></div>
- <main className="studio"><div className="stage"><div className="stage-top"><div className="tabs">{['reality','twin','split'].map(v=><button key={v} className={view===v?'active':''} onClick={()=>setView(v)}>{v==='split'?'Split view':v==='twin'?'Digital twin':'Reality'}</button>)}</div><span className="stage-id">RLM—001 <i/> {controller.paused?'PAUSED':'SIMULATION ACTIVE'}</span></div><div className={'viewport '+(view==='split'?'split':'')}>
- {view!=='twin'&&<div className="reality-pane">{image?<div className="image-map"><img src={image} alt="Uploaded real workspace"/>{source==='GEMINI SCENE'&&scene.objects.map(o=><button aria-label={`Select ${o.label} in image`} className={'bbox '+(selected===o.id?'selected':'')} key={o.id} style={{left:o.bbox[0]*100+'%',top:o.bbox[1]*100+'%',width:(o.bbox[2]-o.bbox[0])*100+'%',height:(o.bbox[3]-o.bbox[1])*100+'%'}} onClick={()=>setSelected(o.id)}><span>{o.label}</span></button>)}</div>:<div className="demo-reality"><Scan size={40}/><h3>A realm starts with reality.</h3><p>This demo uses a built-in semantic scene.<br/>Upload a photograph to create your own.</p><button onClick={()=>setCapture(true)} className="primary">Upload workspace <Upload size={15}/></button></div>}<span className="view-label">01 / REALITY {source==='DEMO SCENE'?'· DEMO HAS NO SOURCE PHOTO':''}</span></div>}
- {view!=='reality'&&<div className="twin-pane">{world}<div className="scene-stats"><span>{String(scene.objects.length).padStart(2,'0')} <small>OBJECTS</small></span><span>{String(scene.objects.filter(o=>o.interactable).length).padStart(2,'0')} <small>INTERACTABLE</small></span><span>{String(scene.obstacles.length).padStart(2,'0')} <small>OBSTACLES</small></span></div><span className="view-label">{view==='split'?'02':'01'} / DIGITAL TWIN <span>ORBIT TO EXPLORE</span></span><div className={'robot-status '+(a.status!=='ACCEPTED'?'warning':'')}><span className="dot"/>{controller.paused?'EMERGENCY STOP':a.status==='ACCEPTED'?'WORKSPACE CLEAR':a.status}</div></div>}
- </div><div className="stage-bottom"><div className="object-summary"><Box size={16}/><strong>{object?.label||'Select an object'}</strong><span>{object?.id}</span>{object&&<><span>{Math.round(object.confidence*100)}% confidence</span><span className="online">{object.interactable?'INTERACTABLE':'OBSTACLE'}</span></>}</div><div className="toolbar"><button onClick={()=>reset(false)}><RotateCcw size={13}/> Reset robot</button><button onClick={()=>reset(true)}>Reset realm</button><button className={controller.paused?'resume':'stop'} onClick={()=>{if(controller.paused){controller.paused=false;controller.message='Ready';}else controller.stop();update();}}>{controller.paused?<Play size={12}/>:<Pause size={12}/>} {controller.paused?'Resume':'Stop'}</button></div></div></div>
- <div className="console-grid"><Vision controller={controller} onSnapshot={s=>{setImage(s);setCapture(true);}}/><section className="panel mission"><div className="panel-heading"><span><Command size={14}/> MISSION CONTROL</span><span className="muted">0{Math.min(controller.level+1,5)} / 05</span></div><div className="mode-tabs"><button className={mode==='manual'?'active':''} onClick={()=>{setMode('manual');if(controller.running)controller.stop();}}>Manual teleop</button><button className={mode==='ai'?'active':''} onClick={()=>setMode('ai')}><Sparkles size={12}/> AI assist</button></div>{mode==='manual'?<><h2>Reach. Pinch. Become.</h2><p className="muted small">Open your palm to move. Pinch to grasp.<br/>Move closer to the camera to reach forward.</p><div className="mission-levels">{['Reach the bottle','Pick up the bottle','Place beside the cup','Avoid collisions','Finish efficiently'].map((s,i)=><div key={s} className={controller.level>i?'done':controller.level===i?'current':''}><span>{controller.level>i?<Check size={12}/>:String(i+1).padStart(2,'0')}</span>{s}</div>)}</div><button className="mini pointer-toggle" onClick={()=>setPointer(!pointer)}>{pointer?'Hide':'Show'} pointer / keyboard controls <ChevronRight size={12}/></button></>:<><label className="input-label" htmlFor="goal">WHAT SHOULD THE ROBOT DO?</label><textarea id="goal" value={goal} onChange={e=>setGoal(e.target.value)} maxLength={500}/><button className="primary full" disabled={Boolean(busy)} onClick={planMission}><Sparkles size={14}/> Generate mission plan</button>{source==='DEMO SCENE'&&<button className="mini full" onClick={()=>{setPlan(demoPlan);setPlanSource('OFFLINE SCRIPT');}}>Load offline demo plan</button>}</>}{plan&&<div className="plan"><div className="plan-title">MISSION PLAN <span>{planSource}</span></div><div className="plan-steps">{plan.steps.map((s,i)=><span key={i} className={controller.stepIndex===i?'current':controller.stepIndex>i?'done':''}>{String(i+1).padStart(2,'0')} {s.action}</span>)}</div><button className="primary full" disabled={controller.running} onClick={()=>{try{controller.start(plan);update();}catch(e){setNotice((e as Error).message);}}}><Play size={13}/> {controller.running?'Executing mission':'Execute validated plan'}</button></div>}</section>
- <section className="panel telemetry"><div className="panel-heading"><span><Activity size={14}/> ROBOT TELEMETRY</span><span className="online">LIVE</span></div><div className="telemetry-main"><span>{a.speed.toFixed(2)}<small>m/s</small></span><div>END-EFFECTOR<br/>VELOCITY</div><svg viewBox="0 0 100 35"><path d={`M0 30 L10 30 L18 ${30-a.speed*30} L28 25 L38 ${28-a.speed*35} L49 30 L60 ${30-a.speed*40} L72 27 L85 30 L100 30`} fill="none" stroke="currentColor"/></svg></div><dl><div><dt>Joint angles · R</dt><dd>{a.joints.map(n=>Math.round(n*180/Math.PI)+'°').join(' / ')}</dd></div><div><dt>End effector · XYZ</dt><dd>{a.end.map(n=>n.toFixed(2)).join(' / ')} m</dd></div><div><dt>Gripper</dt><dd className="online">{controller.held?'HOLDING '+controller.held:a.closed?'CLOSED':'OPEN'}</dd></div><div><dt>Estimated effort</dt><dd>{metrics.energy.toFixed(2)} J</dd></div><div><dt>Reach envelope</dt><dd>{LIMITS.reach} m</dd></div><div><dt>Constraint events</dt><dd>{metrics.collisions} blocked / {metrics.limits} limits</dd></div></dl><div className="telemetry-note">Kinematic arm model · approximate effort<br/>Constrained grasped proxies · Rapier release physics</div></section>
- <section className="panel intelligence"><div className="panel-heading"><span><Sparkles size={14}/> SCENE INTELLIGENCE</span><span className={connected?'online':'muted'}>{connected?'GEMINI READY':'OFFLINE READY'}</span></div><div className="intelligence-icon"><Sparkles size={24}/></div><h2>Reality, understood.</h2><p className="small muted">{source==='GEMINI SCENE'?'Gemini grounded your workspace into simplified, interactive geometry.':'Explore the demo now. Connect Gemini to turn your photograph into a new realm.'}</p><div className="object-chips">{scene.objects.map(o=><button className={selected===o.id?'active':''} key={o.id} onClick={()=>setSelected(o.id)}>{o.label}</button>)}</div><button className="why" disabled={Boolean(busy)} onClick={explain}>Why this action? <ArrowUpRight size={14}/></button>{explanation&&<p className="explanation">{explanation}</p>}<button className="mini" onClick={()=>{const blob=new Blob([JSON.stringify(scene,null,2)],{type:'application/json'}),url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download='realm-scene.json';link.click();URL.revokeObjectURL(url);}}><Download size={12}/> Export scene graph</button></section></div>
- {pointer&&<section className="pointer-panel"><div><strong>Right-arm controls</strong><p>Arrow keys: X/Y · Q/E: depth · G: gripper · Space: stop</p></div>{(['X','Y','Z'] as const).map((label,i)=><label key={label}>{label}<input aria-label={`${label} target`} type="range" min={i===1?.4:-.8} max={i===1?1.8:.8} step=".005" value={a.target[i]} onChange={e=>{const p=[...a.target] as [number,number,number];p[i]=Number(e.target.value);controller.setTarget(1,p,a.closed);update();}}/><span>{a.target[i].toFixed(2)}</span></label>)}<button onClick={()=>{controller.setTarget(1,[...a.target],!a.closed);update();}}>{a.closed?'Release':'Pinch / grasp'}</button></section>}
- <div className="status-line"><span className="dot"/>{controller.message}<span className="status-right">LOCAL VISION · DETERMINISTIC MOTION · SERVER-SIDE AI</span></div>
- </main></>}
- <AnimatePresence>{capture&&<motion.div className="modal-backdrop" initial={{opacity:0}} animate={{opacity:1}} exit={{opacity:0}}><motion.section className="capture-modal" initial={{y:20}} animate={{y:0}} role="dialog" aria-modal="true" aria-labelledby="capture-title"><button className="close" onClick={()=>setCapture(false)} aria-label="Close capture"><X size={19}/></button><div className="eyebrow">01 / CAPTURE REALITY</div><h2 id="capture-title">Every space is a possibility.</h2><p>Bring a desk, a bottle, a cup. We'll build the playground.</p><div className="upload-area" onDragOver={e=>e.preventDefault()} onDrop={e=>{e.preventDefault();upload(e.dataTransfer.files[0]);}}>{image?<img src={image} alt="Workspace to analyze"/>:<><Scan size={42}/><strong>Drop your world here</strong><span>JPEG, PNG or WebP · up to 15 MB</span></>}<button onClick={()=>file.current?.click()}><Upload size={14}/>{image?'Choose another photo':'Choose a photograph'}</button></div><div className="capture-actions"><button className="primary" disabled={!image||Boolean(busy)} onClick={analyze}><Sparkles size={15}/>{busy||'Analyze environment'}<ArrowRight size={15}/></button><button onClick={()=>{setEntered(true);setCapture(false);setNotice('Enable the camera in Operator Vision, then click Snapshot.');}}><Camera size={15}/> Webcam snapshot</button></div><div className="capture-note">Only this photo is sent to Gemini when you analyze it. Live tracking stays on your device. Geometry and dimensions are estimates.</div><button className="text-button" onClick={demo}>Or load the offline demo realm <ArrowRight size={14}/></button></motion.section></motion.div>}</AnimatePresence>
- {help&&<div className="modal-backdrop"><section className="help-modal" role="dialog" aria-modal="true" aria-label="How REALM works"><button className="close" onClick={()=>setHelp(false)} aria-label="Close instructions"><X size={18}/></button><div className="eyebrow">THE HUMAN IS THE INTERFACE</div><h2>You become the robot.</h2><ol><li><strong>Capture reality.</strong> Upload a workspace photo and analyze it with Gemini, or load the offline scene.</li><li><strong>Enable vision.</strong> Keep your upper body and hands in frame. Hold a neutral open-palm pose and calibrate.</li><li><strong>Reach and pinch.</strong> Move your hand sideways/up/down. Move toward the camera to reach forward. Pinch thumb and index to grasp; release to drop.</li><li><strong>Share autonomy.</strong> AI Assist turns a goal into a plan. Review the steps, then execute. The offline plan is a labeled fixed demo.</li></ol><p className="small muted">Space stops motion. Tracking loss freezes arms. Red ghosts indicate rejected targets. This is a simplified tabletop simulation, not a certified robot controller. Navigation is orbital viewing; the humanoid base stays fixed.</p><button className="primary" onClick={()=>setHelp(false)}>Let's build a realm <ArrowRight size={15}/></button></section></div>}
- {controller.complete&&entered&&<div className="result-banner"><div><span className="eyebrow">MISSION COMPLETE</span><h2>Human instinct. Robotic precision.</h2></div><div className="result-stats"><span>{metrics.elapsed.toFixed(1)}s<small>TIME</small></span><span>{efficiency}%<small>PATH EFFICIENCY</small></span><span>{metrics.collisions}<small>BLOCKED COLLISIONS</small></span><span>{metrics.energy.toFixed(1)} J<small>EST. EFFORT</small></span><span>{score}<small>CONTROL SCORE / 100</small></span></div><button onClick={()=>reset(true)}>Try again <RotateCcw size={14}/></button></div>}
- {notice&&<div className="notice" role="status"><span>{notice}</span><button aria-label="Dismiss notification" onClick={()=>setNotice('')}><X size={15}/></button></div>}
- <input type="file" ref={file} accept="image/jpeg,image/png,image/webp" hidden onChange={e=>{upload(e.target.files?.[0]);e.target.value='';}}/>
- </div>;
+import {
+  useEffect,
+  useRef,
+  useState,
+  Suspense,
+  lazy,
+  Component,
+  type ReactNode,
+} from "react";
+import {
+  ArrowUpRight,
+  ArrowRight,
+  Upload,
+  Scan,
+  Layers,
+  Camera,
+  MoveUpRight,
+  RotateCcw,
+  Pause,
+  Play,
+  Box,
+  Activity,
+  ChevronRight,
+  Sparkles,
+  HelpCircle,
+  X,
+  Check,
+  Command,
+  Download,
+} from "lucide-react";
+import { motion, AnimatePresence } from "framer-motion";
+import { demoScene, demoPlan } from "./demo";
+import { Controller, LIMITS } from "./robotics";
+import {
+  SceneSchema,
+  PlanSchema,
+  validateScene,
+  validatePlan,
+  type Scene,
+  type Plan,
+} from "./schema";
+import { Vision } from "./Vision";
+const World = lazy(() => import("./World").then((m) => ({ default: m.World })));
+class CanvasBoundary extends Component<
+  { children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+  render() {
+    return this.state.failed ? (
+      <div className="canvas-failure">
+        3D graphics could not start. Enable hardware acceleration in your
+        browser, then reload.
+      </div>
+    ) : (
+      this.props.children
+    );
+  }
 }
-
+async function api(path: string, body: unknown) {
+  const response = await fetch("/api/" + path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(30000),
+  });
+  const result = await response.json();
+  if (!response.ok) throw Error(result.error || "Request failed");
+  return result;
+}
+export default function App() {
+  const [entered, setEntered] = useState(false),
+    [scene, setScene] = useState<Scene>(demoScene),
+    [controller, setController] = useState(() => new Controller(demoScene)),
+    [selected, setSelected] = useState("bottle_01"),
+    [view, setView] = useState("twin"),
+    [image, setImage] = useState(""),
+    [source, setSource] = useState("DEMO SCENE"),
+    [capture, setCapture] = useState(false),
+    [busy, setBusy] = useState(""),
+    [notice, setNotice] = useState(""),
+    [plan, setPlan] = useState<Plan | null>(null),
+    [planSource, setPlanSource] = useState(""),
+    [goal, setGoal] = useState("Place the bottle beside the cup"),
+    [mode, setMode] = useState("manual"),
+    [explanation, setExplanation] = useState(""),
+    [help, setHelp] = useState(false),
+    [connected, setConnected] = useState(false),
+    [pointer, setPointer] = useState(false),
+    [revision, refresh] = useState(0),
+    [sceneKey, setSceneKey] = useState(0);
+  const file = useRef<HTMLInputElement>(null),
+    currentRequest = useRef(0);
+  const update = () => refresh((n) => n + 1);
+  const a = controller.arms[1],
+    object = scene.objects.find((o) => o.id === selected),
+    metrics = controller.metrics;
+  useEffect(() => {
+    fetch("/api/health")
+      .then((r) => r.json())
+      .then((r) => setConnected(Boolean(r.geminiConfigured)))
+      .catch(() => {});
+  }, []);
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if (
+        event.target instanceof HTMLInputElement ||
+        event.target instanceof HTMLTextAreaElement
+      )
+        return;
+      if (event.code === "Space") {
+        event.preventDefault();
+        controller.stop();
+        update();
+      }
+      if (
+        pointer &&
+        [
+          "ArrowLeft",
+          "ArrowRight",
+          "ArrowUp",
+          "ArrowDown",
+          "KeyQ",
+          "KeyE",
+          "KeyG",
+        ].includes(event.code)
+      ) {
+        event.preventDefault();
+        const arm = controller.arms[1],
+          p = [...arm.target] as [number, number, number];
+        if (event.code === "ArrowLeft") p[0] -= 0.04;
+        if (event.code === "ArrowRight") p[0] += 0.04;
+        if (event.code === "ArrowUp") p[1] += 0.04;
+        if (event.code === "ArrowDown") p[1] -= 0.04;
+        if (event.code === "KeyQ") p[2] -= 0.04;
+        if (event.code === "KeyE") p[2] += 0.04;
+        controller.setTarget(
+          1,
+          p,
+          event.code === "KeyG" ? !arm.closed : arm.closed,
+        );
+        update();
+      }
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [controller, pointer]);
+  function loadScene(next: Scene, origin: string) {
+    setScene(next);
+    setController(new Controller(next));
+    setSelected(next.objects[0]?.id || "");
+    setSource(origin);
+    setPlan(null);
+    setPlanSource("");
+    setSceneKey((k) => k + 1);
+    setEntered(true);
+    setCapture(false);
+    setNotice("REALM GENERATED · " + next.objects.length + " objects grounded");
+  }
+  function demo() {
+    currentRequest.current++;
+    setBusy("");
+    setImage("");
+    loadScene(demoScene, "DEMO SCENE");
+  }
+  function reset(all = false) {
+    currentRequest.current++;
+    setBusy("");
+    if (all) {
+      setController(new Controller(scene));
+      setSceneKey((k) => k + 1);
+    } else {
+      const c = new Controller(scene);
+      c.positions = structuredClone(controller.positions);
+      setController(c);
+      setSceneKey((k) => k + 1);
+    }
+    setPlan(null);
+    setNotice(all ? "Realm reset" : "Robot reset");
+  }
+  async function upload(f: File | undefined) {
+    if (!f) return;
+    if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
+      setNotice("Choose a JPEG, PNG or WebP image.");
+      return;
+    }
+    if (f.size > 15 * 1024 * 1024) {
+      setNotice("Choose an image smaller than 15 MB.");
+      return;
+    }
+    const url = URL.createObjectURL(f);
+    try {
+      const im = new Image();
+      im.src = url;
+      await im.decode();
+      const cv = document.createElement("canvas"),
+        scale = Math.min(1, 1400 / Math.max(im.width, im.height));
+      cv.width = im.width * scale;
+      cv.height = im.height * scale;
+      cv.getContext("2d")!.drawImage(im, 0, 0, cv.width, cv.height);
+      setImage(cv.toDataURL("image/jpeg", 0.86));
+      setCapture(true);
+      setNotice("");
+    } catch {
+      setNotice("This image could not be read.");
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  async function analyze() {
+    const token = ++currentRequest.current;
+    setBusy("Analyzing environment");
+    try {
+      const result = validateScene(
+        SceneSchema.parse(await api("analyze-scene", { image })),
+      );
+      if (token !== currentRequest.current) return;
+      loadScene(result, "GEMINI SCENE");
+      setView("split");
+    } catch (e) {
+      if (token === currentRequest.current) setNotice((e as Error).message);
+    } finally {
+      if (token === currentRequest.current) setBusy("");
+    }
+  }
+  function context() {
+    return {
+      scene,
+      robotState: {
+        endEffector: a.end,
+        joints: a.joints,
+        gripper: a.closed ? "closed" : "open",
+        status: a.status,
+      },
+      constraints: {
+        reach: LIMITS.reach,
+        maxVelocity: LIMITS.maxVelocity,
+        maxAcceleration: LIMITS.maxAcceleration,
+      },
+    };
+  }
+  async function planMission() {
+    const token = ++currentRequest.current;
+    setBusy("Gemini is planning");
+    try {
+      const p = validatePlan(
+        PlanSchema.parse(
+          await api("plan-mission", { ...context(), userGoal: goal }),
+        ),
+        scene,
+      );
+      if (token === currentRequest.current) {
+        setPlan(p);
+        setPlanSource("GEMINI");
+      }
+    } catch (e) {
+      if (token === currentRequest.current) setNotice((e as Error).message);
+    } finally {
+      if (token === currentRequest.current) setBusy("");
+    }
+  }
+  async function explain() {
+    setBusy("Explaining motion");
+    try {
+      const r = await api("explain-action", {
+        ...context(),
+        action: `${controller.plan?.steps[controller.stepIndex]?.action || "manual reach"}; target ${a.target.join(",")}; result ${a.status}`,
+      });
+      setExplanation(r.explanation);
+    } catch (e) {
+      setNotice((e as Error).message);
+      setExplanation(
+        `LOCAL CONSTRAINT CHECK: ${a.status}. The controller checks reach, joint limits and swept arm geometry before moving. Raise the target above the workbench before reaching forward.`,
+      );
+    } finally {
+      setBusy("");
+    }
+  }
+  const efficiency =
+      metrics.path > 0
+        ? Math.min(100, Math.round((metrics.ideal / metrics.path) * 100))
+        : 0,
+    score = Math.max(
+      0,
+      Math.round(
+        100 -
+          metrics.collisions * 8 -
+          metrics.limits * 3 -
+          metrics.corrections * 2 -
+          (100 - efficiency) * 0.15,
+      ),
+    );
+  const world = (
+    <CanvasBoundary>
+      <Suspense fallback={<div className="loading">Building your realm…</div>}>
+        <World
+          key={sceneKey}
+          controller={controller}
+          selected={selected}
+          onSelect={setSelected}
+          onUpdate={update}
+          landing={!entered}
+        />
+      </Suspense>
+    </CanvasBoundary>
+  );
+  return (
+    <div className={entered ? "app laboratory" : "app landing"}>
+      <header>
+        <button
+          className="brand"
+          onClick={() => setEntered(false)}
+          aria-label="REALM home"
+        >
+          <img src="/realm.svg" alt="" />
+          REALM<span>EMBODIED REALITY</span>
+        </button>
+        <div className="header-center">
+          HACKLANTA 2026 <span>/</span> EXPERIMENT 001
+        </div>
+        <button className="header-link" onClick={() => setHelp(true)}>
+          How it works <ArrowUpRight size={14} />
+        </button>
+      </header>
+      {!entered ? (
+        <main className="landing-main">
+          <div className="hero-copy">
+            <motion.div
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ duration: 0.7 }}
+            >
+              <div className="eyebrow">
+                <span className="dot" /> REALITY IS JUST THE BEGINNING
+              </div>
+              <h1>
+                Turn reality into
+                <br />a robotics
+                <br />
+                <em>playground.</em>
+              </h1>
+              <p>
+                One photograph. A new world.
+                <br />
+                Use your hands to become the robot inside it.
+              </p>
+              <div className="hero-actions">
+                <button
+                  className="primary large"
+                  onClick={() => {
+                    setEntered(true);
+                    setCapture(true);
+                  }}
+                >
+                  Enter Realm <ArrowUpRight size={18} />
+                </button>
+                <button className="text-button" onClick={demo}>
+                  Explore the demo <ArrowRight size={16} />
+                </button>
+              </div>
+              <div className="hero-detail">
+                <span>
+                  <Scan size={14} /> Computer vision
+                </span>
+                <span>
+                  <Sparkles size={14} /> Gemini reasoning
+                </span>
+                <span>
+                  <Box size={14} /> Real physics
+                </span>
+              </div>
+            </motion.div>
+          </div>
+          <div className="hero-world">
+            {world}
+            <div className="world-index">
+              <span className="dot" /> LIVE SIMULATION <span>01 / REALM</span>
+            </div>
+            <div className="hero-caption">
+              <span>YOU DON'T CONTROL THE ROBOT.</span>
+              <strong>You become the robot.</strong>
+            </div>
+            <div className="coordinates">
+              X 0.231 &nbsp; Y 1.380 &nbsp; Z −0.012
+              <br />
+              SEMANTIC DIGITAL TWIN / DEMO
+            </div>
+          </div>
+          <footer className="landing-footer">
+            <span>
+              REAL WORLD <ChevronRight /> DIGITAL TWIN <ChevronRight /> HUMAN
+              MOTION <ChevronRight /> ROBOT ACTION
+            </span>
+            <span>
+              BUILT TO BE EXPERIENCED <MoveUpRight size={15} />
+            </span>
+          </footer>
+        </main>
+      ) : (
+        <>
+          <div className="workspace-bar">
+            <div>
+              <span className="dot" />
+              <strong>{scene.sceneType}</strong>
+              <span className="pill">{source}</span>
+            </div>
+            <div className="toolbar">
+              <button onClick={() => setCapture(true)}>
+                <Upload size={14} /> Capture reality
+              </button>
+              <button onClick={demo}>Load demo realm</button>
+              <button aria-label="Instructions" onClick={() => setHelp(true)}>
+                <HelpCircle size={16} />
+              </button>
+            </div>
+          </div>
+          <main className="studio">
+            <div className="stage">
+              <div className="stage-top">
+                <div className="tabs">
+                  {["reality", "twin", "split"].map((v) => (
+                    <button
+                      key={v}
+                      className={view === v ? "active" : ""}
+                      onClick={() => setView(v)}
+                    >
+                      {v === "split"
+                        ? "Split view"
+                        : v === "twin"
+                          ? "Digital twin"
+                          : "Reality"}
+                    </button>
+                  ))}
+                </div>
+                <span className="stage-id">
+                  RLM—001 <i />{" "}
+                  {controller.paused ? "PAUSED" : "SIMULATION ACTIVE"}
+                </span>
+              </div>
+              <div className={"viewport " + (view === "split" ? "split" : "")}>
+                {view !== "twin" && (
+                  <div className="reality-pane">
+                    {image ? (
+                      <div className="image-map">
+                        <img src={image} alt="Uploaded real workspace" />
+                        {source === "GEMINI SCENE" &&
+                          scene.objects.map((o) => (
+                            <button
+                              aria-label={`Select ${o.label} in image`}
+                              className={
+                                "bbox " + (selected === o.id ? "selected" : "")
+                              }
+                              key={o.id}
+                              style={{
+                                left: o.bbox[0] * 100 + "%",
+                                top: o.bbox[1] * 100 + "%",
+                                width: (o.bbox[2] - o.bbox[0]) * 100 + "%",
+                                height: (o.bbox[3] - o.bbox[1]) * 100 + "%",
+                              }}
+                              onClick={() => setSelected(o.id)}
+                            >
+                              <span>{o.label}</span>
+                            </button>
+                          ))}
+                      </div>
+                    ) : (
+                      <div className="demo-reality">
+                        <Scan size={40} />
+                        <h3>A realm starts with reality.</h3>
+                        <p>
+                          This demo uses a built-in semantic scene.
+                          <br />
+                          Upload a photograph to create your own.
+                        </p>
+                        <button
+                          onClick={() => setCapture(true)}
+                          className="primary"
+                        >
+                          Upload workspace <Upload size={15} />
+                        </button>
+                      </div>
+                    )}
+                    <span className="view-label">
+                      01 / REALITY{" "}
+                      {source === "DEMO SCENE"
+                        ? "· DEMO HAS NO SOURCE PHOTO"
+                        : ""}
+                    </span>
+                  </div>
+                )}
+                {view !== "reality" && (
+                  <div className="twin-pane">
+                    {world}
+                    <div className="scene-stats">
+                      <span>
+                        {String(scene.objects.length).padStart(2, "0")}{" "}
+                        <small>OBJECTS</small>
+                      </span>
+                      <span>
+                        {String(
+                          scene.objects.filter((o) => o.interactable).length,
+                        ).padStart(2, "0")}{" "}
+                        <small>INTERACTABLE</small>
+                      </span>
+                      <span>
+                        {String(scene.obstacles.length).padStart(2, "0")}{" "}
+                        <small>OBSTACLES</small>
+                      </span>
+                    </div>
+                    <span className="view-label">
+                      {view === "split" ? "02" : "01"} / DIGITAL TWIN{" "}
+                      <span>ORBIT TO EXPLORE</span>
+                    </span>
+                    <div
+                      className={
+                        "robot-status " +
+                        (a.status !== "ACCEPTED" ? "warning" : "")
+                      }
+                    >
+                      <span className="dot" />
+                      {controller.paused
+                        ? "EMERGENCY STOP"
+                        : a.status === "ACCEPTED"
+                          ? "WORKSPACE CLEAR"
+                          : a.status}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="stage-bottom">
+                <div className="object-summary">
+                  <Box size={16} />
+                  <strong>{object?.label || "Select an object"}</strong>
+                  <span>{object?.id}</span>
+                  {object && (
+                    <>
+                      <span>
+                        {Math.round(object.confidence * 100)}% confidence
+                      </span>
+                      <span className="online">
+                        {object.interactable ? "INTERACTABLE" : "OBSTACLE"}
+                      </span>
+                    </>
+                  )}
+                </div>
+                <div className="toolbar">
+                  <button onClick={() => reset(false)}>
+                    <RotateCcw size={13} /> Reset robot
+                  </button>
+                  <button onClick={() => reset(true)}>Reset realm</button>
+                  <button
+                    className={controller.paused ? "resume" : "stop"}
+                    onClick={() => {
+                      if (controller.paused) {
+                        controller.paused = false;
+                        controller.message = "Ready";
+                      } else controller.stop();
+                      update();
+                    }}
+                  >
+                    {controller.paused ? (
+                      <Play size={12} />
+                    ) : (
+                      <Pause size={12} />
+                    )}{" "}
+                    {controller.paused ? "Resume" : "Stop"}
+                  </button>
+                </div>
+              </div>
+            </div>
+            <div className="console-grid">
+              <Vision
+                controller={controller}
+                onSnapshot={(s) => {
+                  setImage(s);
+                  setCapture(true);
+                }}
+              />
+              <section className="panel mission">
+                <div className="panel-heading">
+                  <span>
+                    <Command size={14} /> MISSION CONTROL
+                  </span>
+                  <span className="muted">
+                    0{Math.min(controller.level + 1, 5)} / 05
+                  </span>
+                </div>
+                <div className="mode-tabs">
+                  <button
+                    className={mode === "manual" ? "active" : ""}
+                    onClick={() => {
+                      setMode("manual");
+                      if (controller.running) controller.stop();
+                    }}
+                  >
+                    Manual teleop
+                  </button>
+                  <button
+                    className={mode === "ai" ? "active" : ""}
+                    onClick={() => setMode("ai")}
+                  >
+                    <Sparkles size={12} /> AI assist
+                  </button>
+                </div>
+                {mode === "manual" ? (
+                  <>
+                    <h2>Reach. Pinch. Become.</h2>
+                    <p className="muted small">
+                      Open your palm to move. Pinch to grasp.
+                      <br />
+                      Move closer to the camera to reach forward.
+                    </p>
+                    <div className="mission-levels">
+                      {[
+                        "Reach the bottle",
+                        "Pick up the bottle",
+                        "Place beside the cup",
+                        "Avoid collisions",
+                        "Finish efficiently",
+                      ].map((s, i) => (
+                        <div
+                          key={s}
+                          className={
+                            controller.level > i
+                              ? "done"
+                              : controller.level === i
+                                ? "current"
+                                : ""
+                          }
+                        >
+                          <span>
+                            {controller.level > i ? (
+                              <Check size={12} />
+                            ) : (
+                              String(i + 1).padStart(2, "0")
+                            )}
+                          </span>
+                          {s}
+                        </div>
+                      ))}
+                    </div>
+                    <button
+                      className="mini pointer-toggle"
+                      onClick={() => setPointer(!pointer)}
+                    >
+                      {pointer ? "Hide" : "Show"} pointer / keyboard controls{" "}
+                      <ChevronRight size={12} />
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <label className="input-label" htmlFor="goal">
+                      WHAT SHOULD THE ROBOT DO?
+                    </label>
+                    <textarea
+                      id="goal"
+                      value={goal}
+                      onChange={(e) => setGoal(e.target.value)}
+                      maxLength={500}
+                    />
+                    <button
+                      className="primary full"
+                      disabled={Boolean(busy)}
+                      onClick={planMission}
+                    >
+                      <Sparkles size={14} /> Generate mission plan
+                    </button>
+                    {source === "DEMO SCENE" && (
+                      <button
+                        className="mini full"
+                        onClick={() => {
+                          setPlan(demoPlan);
+                          setPlanSource("OFFLINE SCRIPT");
+                        }}
+                      >
+                        Load offline demo plan
+                      </button>
+                    )}
+                  </>
+                )}
+                {plan && (
+                  <div className="plan">
+                    <div className="plan-title">
+                      MISSION PLAN <span>{planSource}</span>
+                    </div>
+                    <div className="plan-steps">
+                      {plan.steps.map((s, i) => (
+                        <span
+                          key={i}
+                          className={
+                            controller.stepIndex === i
+                              ? "current"
+                              : controller.stepIndex > i
+                                ? "done"
+                                : ""
+                          }
+                        >
+                          {String(i + 1).padStart(2, "0")} {s.action}
+                        </span>
+                      ))}
+                    </div>
+                    <button
+                      className="primary full"
+                      disabled={controller.running}
+                      onClick={() => {
+                        try {
+                          controller.start(plan);
+                          update();
+                        } catch (e) {
+                          setNotice((e as Error).message);
+                        }
+                      }}
+                    >
+                      <Play size={13} />{" "}
+                      {controller.running
+                        ? "Executing mission"
+                        : "Execute validated plan"}
+                    </button>
+                  </div>
+                )}
+              </section>
+              <section className="panel telemetry">
+                <div className="panel-heading">
+                  <span>
+                    <Activity size={14} /> ROBOT TELEMETRY
+                  </span>
+                  <span className="online">LIVE</span>
+                </div>
+                <div className="telemetry-main">
+                  <span>
+                    {a.speed.toFixed(2)}
+                    <small>m/s</small>
+                  </span>
+                  <div>
+                    END-EFFECTOR
+                    <br />
+                    VELOCITY
+                  </div>
+                  <svg viewBox="0 0 100 35">
+                    <path
+                      d={`M0 30 L10 30 L18 ${30 - a.speed * 30} L28 25 L38 ${28 - a.speed * 35} L49 30 L60 ${30 - a.speed * 40} L72 27 L85 30 L100 30`}
+                      fill="none"
+                      stroke="currentColor"
+                    />
+                  </svg>
+                </div>
+                <dl>
+                  <div>
+                    <dt>Joint angles · R</dt>
+                    <dd>
+                      {a.joints
+                        .map((n) => Math.round((n * 180) / Math.PI) + "°")
+                        .join(" / ")}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>End effector · XYZ</dt>
+                    <dd>{a.end.map((n) => n.toFixed(2)).join(" / ")} m</dd>
+                  </div>
+                  <div>
+                    <dt>Gripper</dt>
+                    <dd className="online">
+                      {controller.held
+                        ? "HOLDING " + controller.held
+                        : a.closed
+                          ? "CLOSED"
+                          : "OPEN"}
+                    </dd>
+                  </div>
+                  <div>
+                    <dt>Estimated effort</dt>
+                    <dd>{metrics.energy.toFixed(2)} J</dd>
+                  </div>
+                  <div>
+                    <dt>Reach envelope</dt>
+                    <dd>{LIMITS.reach} m</dd>
+                  </div>
+                  <div>
+                    <dt>Constraint events</dt>
+                    <dd>
+                      {metrics.collisions} blocked / {metrics.limits} limits
+                    </dd>
+                  </div>
+                </dl>
+                <div className="telemetry-note">
+                  Kinematic arm model · approximate effort
+                  <br />
+                  Constrained grasped proxies · Rapier release physics
+                </div>
+              </section>
+              <section className="panel intelligence">
+                <div className="panel-heading">
+                  <span>
+                    <Sparkles size={14} /> SCENE INTELLIGENCE
+                  </span>
+                  <span className={connected ? "online" : "muted"}>
+                    {connected ? "GEMINI READY" : "OFFLINE READY"}
+                  </span>
+                </div>
+                <div className="intelligence-icon">
+                  <Sparkles size={24} />
+                </div>
+                <h2>Reality, understood.</h2>
+                <p className="small muted">
+                  {source === "GEMINI SCENE"
+                    ? "Gemini grounded your workspace into simplified, interactive geometry."
+                    : "Explore the demo now. Connect Gemini to turn your photograph into a new realm."}
+                </p>
+                <div className="object-chips">
+                  {scene.objects.map((o) => (
+                    <button
+                      className={selected === o.id ? "active" : ""}
+                      key={o.id}
+                      onClick={() => setSelected(o.id)}
+                    >
+                      {o.label}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  className="why"
+                  disabled={Boolean(busy)}
+                  onClick={explain}
+                >
+                  Why this action? <ArrowUpRight size={14} />
+                </button>
+                {explanation && <p className="explanation">{explanation}</p>}
+                <button
+                  className="mini"
+                  onClick={() => {
+                    const blob = new Blob([JSON.stringify(scene, null, 2)], {
+                        type: "application/json",
+                      }),
+                      url = URL.createObjectURL(blob),
+                      link = document.createElement("a");
+                    link.href = url;
+                    link.download = "realm-scene.json";
+                    link.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
+                  <Download size={12} /> Export scene graph
+                </button>
+              </section>
+            </div>
+            {pointer && (
+              <section className="pointer-panel">
+                <div>
+                  <strong>Right-arm controls</strong>
+                  <p>Arrow keys: X/Y · Q/E: depth · G: gripper · Space: stop</p>
+                </div>
+                {(["X", "Y", "Z"] as const).map((label, i) => (
+                  <label key={label}>
+                    {label}
+                    <input
+                      aria-label={`${label} target`}
+                      type="range"
+                      min={i === 1 ? 0.4 : -0.8}
+                      max={i === 1 ? 1.8 : 0.8}
+                      step=".005"
+                      value={a.target[i]}
+                      onChange={(e) => {
+                        const p = [...a.target] as [number, number, number];
+                        p[i] = Number(e.target.value);
+                        controller.setTarget(1, p, a.closed);
+                        update();
+                      }}
+                    />
+                    <span>{a.target[i].toFixed(2)}</span>
+                  </label>
+                ))}
+                <button
+                  onClick={() => {
+                    controller.setTarget(1, [...a.target], !a.closed);
+                    update();
+                  }}
+                >
+                  {a.closed ? "Release" : "Pinch / grasp"}
+                </button>
+              </section>
+            )}
+            <div className="status-line">
+              <span className="dot" />
+              {controller.message}
+              <span className="status-right">
+                LOCAL VISION · DETERMINISTIC MOTION · SERVER-SIDE AI
+              </span>
+            </div>
+          </main>
+        </>
+      )}
+      <AnimatePresence>
+        {capture && (
+          <motion.div
+            className="modal-backdrop"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+          >
+            <motion.section
+              className="capture-modal"
+              initial={{ y: 20 }}
+              animate={{ y: 0 }}
+              role="dialog"
+              aria-modal="true"
+              aria-labelledby="capture-title"
+            >
+              <button
+                className="close"
+                onClick={() => setCapture(false)}
+                aria-label="Close capture"
+              >
+                <X size={19} />
+              </button>
+              <div className="eyebrow">01 / CAPTURE REALITY</div>
+              <h2 id="capture-title">Every space is a possibility.</h2>
+              <p>Bring a desk, a bottle, a cup. We'll build the playground.</p>
+              <div
+                className="upload-area"
+                onDragOver={(e) => e.preventDefault()}
+                onDrop={(e) => {
+                  e.preventDefault();
+                  upload(e.dataTransfer.files[0]);
+                }}
+              >
+                {image ? (
+                  <img src={image} alt="Workspace to analyze" />
+                ) : (
+                  <>
+                    <Scan size={42} />
+                    <strong>Drop your world here</strong>
+                    <span>JPEG, PNG or WebP · up to 15 MB</span>
+                  </>
+                )}
+                <button onClick={() => file.current?.click()}>
+                  <Upload size={14} />
+                  {image ? "Choose another photo" : "Choose a photograph"}
+                </button>
+              </div>
+              <div className="capture-actions">
+                <button
+                  className="primary"
+                  disabled={!image || Boolean(busy)}
+                  onClick={analyze}
+                >
+                  <Sparkles size={15} />
+                  {busy || "Analyze environment"}
+                  <ArrowRight size={15} />
+                </button>
+                <button
+                  onClick={() => {
+                    setEntered(true);
+                    setCapture(false);
+                    setNotice(
+                      "Enable the camera in Operator Vision, then click Snapshot.",
+                    );
+                  }}
+                >
+                  <Camera size={15} /> Webcam snapshot
+                </button>
+              </div>
+              <div className="capture-note">
+                Only this photo is sent to Gemini when you analyze it. Live
+                tracking stays on your device. Geometry and dimensions are
+                estimates.
+              </div>
+              <button className="text-button" onClick={demo}>
+                Or load the offline demo realm <ArrowRight size={14} />
+              </button>
+            </motion.section>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      {help && (
+        <div className="modal-backdrop">
+          <section
+            className="help-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="How REALM works"
+          >
+            <button
+              className="close"
+              onClick={() => setHelp(false)}
+              aria-label="Close instructions"
+            >
+              <X size={18} />
+            </button>
+            <div className="eyebrow">THE HUMAN IS THE INTERFACE</div>
+            <h2>You become the robot.</h2>
+            <ol>
+              <li>
+                <strong>Capture reality.</strong> Upload a workspace photo and
+                analyze it with Gemini, or load the offline scene.
+              </li>
+              <li>
+                <strong>Enable vision.</strong> Keep your upper body and hands
+                in frame. Hold a neutral open-palm pose and calibrate.
+              </li>
+              <li>
+                <strong>Reach and pinch.</strong> Move your hand
+                sideways/up/down. Move toward the camera to reach forward. Pinch
+                thumb and index to grasp; release to drop.
+              </li>
+              <li>
+                <strong>Share autonomy.</strong> AI Assist turns a goal into a
+                plan. Review the steps, then execute. The offline plan is a
+                labeled fixed demo.
+              </li>
+            </ol>
+            <p className="small muted">
+              Space stops motion. Tracking loss freezes arms. Red ghosts
+              indicate rejected targets. This is a simplified tabletop
+              simulation, not a certified robot controller. Navigation is
+              orbital viewing; the humanoid base stays fixed.
+            </p>
+            <button className="primary" onClick={() => setHelp(false)}>
+              Let's build a realm <ArrowRight size={15} />
+            </button>
+          </section>
+        </div>
+      )}
+      {controller.complete && entered && (
+        <div className="result-banner">
+          <div>
+            <span className="eyebrow">MISSION COMPLETE</span>
+            <h2>Human instinct. Robotic precision.</h2>
+          </div>
+          <div className="result-stats">
+            <span>
+              {metrics.elapsed.toFixed(1)}s<small>TIME</small>
+            </span>
+            <span>
+              {efficiency}%<small>PATH EFFICIENCY</small>
+            </span>
+            <span>
+              {metrics.collisions}
+              <small>BLOCKED COLLISIONS</small>
+            </span>
+            <span>
+              {metrics.limits}
+              <small>JOINT / REACH EVENTS</small>
+            </span>
+            <span>
+              {metrics.corrections}
+              <small>MANUAL TAKEOVERS</small>
+            </span>
+            <span>
+              {metrics.energy.toFixed(1)} J<small>EST. EFFORT</small>
+            </span>
+            <span>
+              {score}
+              <small>CONTROL SCORE / 100</small>
+            </span>
+          </div>
+          <button onClick={() => reset(true)}>
+            Try again <RotateCcw size={14} />
+          </button>
+        </div>
+      )}
+      {notice && (
+        <div className="notice" role="status">
+          <span>{notice}</span>
+          <button
+            aria-label="Dismiss notification"
+            onClick={() => setNotice("")}
+          >
+            <X size={15} />
+          </button>
+        </div>
+      )}
+      <input
+        type="file"
+        ref={file}
+        accept="image/jpeg,image/png,image/webp"
+        hidden
+        onChange={(e) => {
+          upload(e.target.files?.[0]);
+          e.target.value = "";
+        }}
+      />
+    </div>
+  );
+}

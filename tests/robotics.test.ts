@@ -1,13 +1,123 @@
-import test from 'node:test';import assert from 'node:assert/strict';
-import { Controller,inverse,forward,shoulder,distance,LIMITS,segmentHits } from '../src/robotics.ts';
-import { demoScene,demoPlan } from '../src/demo.ts';
-import { SceneSchema,validateScene,validatePlan } from '../src/schema.ts';
-import { handleOperation } from '../server/handler.ts';
-test('inverse kinematics round-trips reachable targets',()=>{for(const p of [[.2,1.1,.05],[.3,1.3,-.1],[-.1,1.1,.1]] as [number,number,number][]){const solve=inverse(p,shoulder(1));assert.equal(solve.status,'ACCEPTED');assert.ok(distance(forward(solve.joints,shoulder(1)).end,p)<1e-8);}});
-test('unreachable target is blocked without moving',()=>{const c=new Controller(demoScene),initial=[...c.arms[1].end] as [number,number,number];c.setTarget(1,[8,8,8],false);for(let i=0;i<60;i++)c.tick(1/60);assert.equal(c.arms[1].status,'OUTSIDE WORKSPACE');assert.deepEqual(c.arms[1].end,initial);assert.equal(c.metrics.limits,1);});
-test('desk collision is blocked and emergency stop holds pose',()=>{const c=new Controller(demoScene);c.setTarget(1,[.3,.74,0],false);c.tick(.016);assert.equal(c.arms[1].status,'COLLISION RISK');c.stop();const p=structuredClone(c.arms);c.tick(.03);assert.deepEqual(c.arms,p);});
-test('swept segment collision catches a thin obstacle between endpoints',()=>{assert.equal(segmentHits([-1,1,0],[1,1,0],{center:[0,1,0],half:[.01,.1,.1]}),true);});
-test('demo plan reaches, grasps, carries, releases and completes',()=>{const c=new Controller(demoScene);c.start(demoPlan);const visited=new Set<number>();for(let i=0;i<60*60;i++){visited.add(c.stepIndex);c.tick(1/60);if(c.released){const o=demoScene.objects.find(o=>o.id===c.released)!;c.positions[c.released][1]=demoScene.surfaces[0].height+o.approximateScale.y/2;}if(c.complete)break;}assert.equal(c.complete,true,JSON.stringify({step:c.stepIndex,status:c.arms[1].status,message:c.message,end:c.arms[1].end,target:c.arms[1].target}));assert.equal(c.held,null);assert.equal(visited.size,9);assert.ok(c.metrics.energy>0);assert.equal(c.metrics.collisions,0);});
-test('moving arm stays below velocity cap and joint limits',()=>{const c=new Controller(demoScene);c.setTarget(1,[.4,1.3,0],false);for(let i=0;i<300;i++){c.tick(1/60);assert.ok(c.arms[1].speed<=LIMITS.maxVelocity+1e-8);assert.ok(c.arms[1].joints[2]>=LIMITS.elbow[0]);}});
-test('scene and mission reject duplicate or unknown object references',()=>{assert.doesNotThrow(()=>validateScene(SceneSchema.parse(demoScene)));const s=structuredClone(demoScene);s.objects.push(s.objects[0]);assert.throws(()=>validateScene(s));const p=structuredClone(demoPlan);p.steps[0].target='invented';assert.throws(()=>validatePlan(p,demoScene));});
-test('API validates images before calling Gemini and degrades safely without key',async()=>{assert.equal((await handleOperation('analyze-scene',{image:'javascript:bad'})).status,400);const saved=process.env.GEMINI_API_KEY;delete process.env.GEMINI_API_KEY;try{assert.equal((await handleOperation('analyze-scene',{image:'data:image/png;base64,aGVsbG8='})).status,503);}finally{if(saved)process.env.GEMINI_API_KEY=saved;}assert.equal((await handleOperation('other',{})).status,404);});
+import test from "node:test";
+import assert from "node:assert/strict";
+import {
+  Controller,
+  inverse,
+  forward,
+  shoulder,
+  distance,
+  LIMITS,
+  segmentHits,
+} from "../src/robotics.ts";
+import { demoScene, demoPlan } from "../src/demo.ts";
+import { SceneSchema, validateScene, validatePlan } from "../src/schema.ts";
+import { handleOperation } from "../server/handler.ts";
+test("inverse kinematics round-trips reachable targets", () => {
+  for (const p of [
+    [0.2, 1.1, 0.05],
+    [0.3, 1.3, -0.1],
+    [-0.1, 1.1, 0.1],
+  ] as [number, number, number][]) {
+    const solve = inverse(p, shoulder(1));
+    assert.equal(solve.status, "ACCEPTED");
+    assert.ok(distance(forward(solve.joints, shoulder(1)).end, p) < 1e-8);
+  }
+});
+test("unreachable target is blocked without moving", () => {
+  const c = new Controller(demoScene),
+    initial = [...c.arms[1].end] as [number, number, number];
+  c.setTarget(1, [8, 8, 8], false);
+  for (let i = 0; i < 60; i++) c.tick(1 / 60);
+  assert.equal(c.arms[1].status, "OUTSIDE WORKSPACE");
+  assert.deepEqual(c.arms[1].end, initial);
+  assert.equal(c.metrics.limits, 1);
+});
+test("desk collision is blocked and emergency stop holds pose", () => {
+  const c = new Controller(demoScene);
+  c.setTarget(1, [0.3, 0.74, 0], false);
+  c.tick(0.016);
+  assert.equal(c.arms[1].status, "COLLISION RISK");
+  c.stop();
+  const p = structuredClone(c.arms);
+  c.tick(0.03);
+  assert.deepEqual(c.arms, p);
+});
+test("swept segment collision catches a thin obstacle between endpoints", () => {
+  assert.equal(
+    segmentHits([-1, 1, 0], [1, 1, 0], {
+      center: [0, 1, 0],
+      half: [0.01, 0.1, 0.1],
+    }),
+    true,
+  );
+});
+test("demo plan reaches, grasps, carries, releases and completes", () => {
+  const c = new Controller(demoScene);
+  c.start(demoPlan);
+  const visited = new Set<number>();
+  for (let i = 0; i < 60 * 60; i++) {
+    visited.add(c.stepIndex);
+    c.tick(1 / 60);
+    if (c.released) {
+      const o = demoScene.objects.find((o) => o.id === c.released)!;
+      c.positions[c.released][1] =
+        demoScene.surfaces[0].height + o.approximateScale.y / 2;
+    }
+    if (c.complete) break;
+  }
+  assert.equal(
+    c.complete,
+    true,
+    JSON.stringify({
+      step: c.stepIndex,
+      status: c.arms[1].status,
+      message: c.message,
+      end: c.arms[1].end,
+      target: c.arms[1].target,
+    }),
+  );
+  assert.equal(c.held, null);
+  assert.equal(visited.size, 9);
+  assert.ok(c.metrics.energy > 0);
+  assert.equal(c.metrics.collisions, 0);
+});
+test("moving arm stays below velocity cap and joint limits", () => {
+  const c = new Controller(demoScene);
+  c.setTarget(1, [0.4, 1.3, 0], false);
+  for (let i = 0; i < 300; i++) {
+    c.tick(1 / 60);
+    assert.ok(c.arms[1].speed <= LIMITS.maxVelocity + 1e-8);
+    assert.ok(c.arms[1].joints[2] >= LIMITS.elbow[0]);
+  }
+});
+test("scene and mission reject duplicate or unknown object references", () => {
+  assert.doesNotThrow(() => validateScene(SceneSchema.parse(demoScene)));
+  const s = structuredClone(demoScene);
+  s.objects.push(s.objects[0]);
+  assert.throws(() => validateScene(s));
+  const p = structuredClone(demoPlan);
+  p.steps[0].target = "invented";
+  assert.throws(() => validatePlan(p, demoScene));
+});
+test("API validates images before calling Gemini and degrades safely without key", async () => {
+  assert.equal(
+    (await handleOperation("analyze-scene", { image: "javascript:bad" }))
+      .status,
+    400,
+  );
+  const saved = process.env.GEMINI_API_KEY;
+  delete process.env.GEMINI_API_KEY;
+  try {
+    assert.equal(
+      (
+        await handleOperation("analyze-scene", {
+          image: "data:image/png;base64,aGVsbG8=",
+        })
+      ).status,
+      503,
+    );
+  } finally {
+    if (saved) process.env.GEMINI_API_KEY = saved;
+  }
+  assert.equal((await handleOperation("other", {})).status, 404);
+});

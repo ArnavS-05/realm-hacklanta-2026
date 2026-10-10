@@ -1,25 +1,422 @@
-import { useEffect,useRef,useState } from 'react';
-import { Camera,ScanLine,RefreshCw,VideoOff } from 'lucide-react';
-import type { HandLandmarker,PoseLandmarker,NormalizedLandmark } from '@mediapipe/tasks-vision';
-import { Controller,clamp } from './robotics';
-type Stats={hands:string[],pose:boolean,gesture:string,confidence:number,angles:number[]};
-const edges=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[0,17],[17,18],[18,19],[19,20]];
-export function Vision({controller,onSnapshot}:{controller:Controller,onSnapshot:(s:string)=>void}){
- const video=useRef<HTMLVideoElement>(null),canvas=useRef<HTMLCanvasElement>(null),stream=useRef<MediaStream|null>(null),hand=useRef<HandLandmarker|null>(null),pose=useRef<PoseLandmarker|null>(null),frame=useRef(0),active=useRef(false),generation=useRef(0),center=useRef<Record<string,number[]>>({}),latest=useRef<Record<string,number[]>>({}),pinch=useRef<Record<string,boolean>>({});
- const [status,setStatus]=useState('CAMERA OFF'),[stats,setStats]=useState<Stats>({hands:[],pose:false,gesture:'Awaiting operator',confidence:0,angles:[]});
- function stop(){generation.current++;active.current=false;cancelAnimationFrame(frame.current);stream.current?.getTracks().forEach(t=>t.stop());stream.current=null;hand.current?.close();pose.current?.close();hand.current=null;pose.current=null;if(video.current)video.current.srcObject=null;setStatus('CAMERA OFF');setStats({hands:[],pose:false,gesture:'Awaiting operator',confidence:0,angles:[]});controller.arms.forEach(a=>{a.target=[...a.end];a.velocity=[0,0,0];});}
- useEffect(()=>()=>{generation.current++;active.current=false;cancelAnimationFrame(frame.current);stream.current?.getTracks().forEach(t=>t.stop());hand.current?.close();pose.current?.close();},[]);
- useEffect(()=>{if(active.current)stop();},[controller]);
- async function start(){if(active.current)return;const token=++generation.current;setStatus('STARTING CAMERA');try{const media=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'},audio:false});if(token!==generation.current){media.getTracks().forEach(t=>t.stop());return;}stream.current=media;video.current!.srcObject=media;await video.current!.play();setStatus('LOADING VISION');const {FilesetResolver,HandLandmarker,PoseLandmarker}=await import('@mediapipe/tasks-vision');const files=await FilesetResolver.forVisionTasks('/vision/wasm');const h=await HandLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'/vision/hand_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numHands:2,minHandDetectionConfidence:.55,minTrackingConfidence:.55});if(token!==generation.current){h.close();return;}hand.current=h;const p=await PoseLandmarker.createFromOptions(files,{baseOptions:{modelAssetPath:'/vision/pose_landmarker_lite.task',delegate:'CPU'},runningMode:'VIDEO',numPoses:1,minPoseDetectionConfidence:.55});if(token!==generation.current){p.close();return;}pose.current=p;active.current=true;setStatus('CV ONLINE');let previous=0,iteration=0,lastSeen:Record<number,number>={};
- const loop=(now:number)=>{if(!active.current||!video.current)return;try{if(now-previous>65&&video.current.readyState>=2){previous=now;const result=h.detectForVideo(video.current,now),body=iteration++%3===0?p.detectForVideo(video.current,now):null;const ctx=canvas.current!.getContext('2d')!;ctx.clearRect(0,0,640,480);ctx.strokeStyle='#b4f277';ctx.fillStyle='#b4f277';ctx.lineWidth=2;const detected:string[]=[];let gesture='Open palm to engage',confidence=0;
- result.landmarks.forEach((landmarks,index)=>{const label=result.handedness[index][0].categoryName;const side=label==='Left'?-1:1;detected.push(label);confidence=Math.max(confidence,result.handedness[index][0].score);const wrist=landmarks[0],indexTip=landmarks[8],thumb=landmarks[4];const span=Math.hypot(landmarks[5].x-landmarks[17].x,landmarks[5].y-landmarks[17].y);const ratio=Math.hypot(indexTip.x-thumb.x,indexTip.y-thumb.y)/Math.max(span,.02);const closed=ratio<(pinch.current[label]?.6:.4);pinch.current[label]=closed;latest.current[label]=[wrist.x,wrist.y,span];if(!center.current[label])center.current[label]=[wrist.x,wrist.y,span];const c=center.current[label];const extended=[8,12,16,20].filter(i=>Math.hypot(landmarks[i].x-wrist.x,landmarks[i].y-wrist.y)>Math.hypot(landmarks[i-2].x-wrist.x,landmarks[i-2].y-wrist.y)*1.15).length;
- if(extended>=3||closed){const x=side*.4-(wrist.x-c[0])*1.6,y=1.08-(wrist.y-c[1])*1.5,z=.03-(span-c[2])*3.4;const arm=controller.arms.find(a=>a.side===side)!;if(!controller.paused&&!controller.running){controller.setTarget(side,[clamp(x,-1,1),clamp(y,.4,1.9),clamp(z,-.65,.55)],closed);}gesture=closed?'PINCH · GRASP':'OPEN PALM · FOLLOW';lastSeen[side]=now;}
- for(const [a,b]of edges){ctx.beginPath();ctx.moveTo(landmarks[a].x*640,landmarks[a].y*480);ctx.lineTo(landmarks[b].x*640,landmarks[b].y*480);ctx.stroke();}for(const point of landmarks){ctx.beginPath();ctx.arc(point.x*640,point.y*480,3,0,Math.PI*2);ctx.fill();}});
- // Tracking loss freezes the arm; never continue an old unobserved target.
- if(!controller.running)for(const a of controller.arms)if(now-(lastSeen[a.side]||0)>350){a.target=[...a.end];a.velocity=[0,0,0];}
- let angles:number[]=[];if(body?.landmarks[0]){const lm=body.landmarks[0];ctx.strokeStyle='#69b9df';for(const [a,b]of [[11,13],[13,15],[12,14],[14,16],[11,12],[11,23],[12,24],[23,24]]){ctx.beginPath();ctx.moveTo(lm[a].x*640,lm[a].y*480);ctx.lineTo(lm[b].x*640,lm[b].y*480);ctx.stroke();}const angle=(a:NormalizedLandmark,b:NormalizedLandmark,c:NormalizedLandmark)=>{const ux=a.x-b.x,uy=a.y-b.y,vx=c.x-b.x,vy=c.y-b.y;return Math.acos(clamp((ux*vx+uy*vy)/(Math.hypot(ux,uy)*Math.hypot(vx,vy)||1),-1,1))*180/Math.PI;};angles=[angle(lm[24],lm[12],lm[14]),angle(lm[12],lm[14],lm[16]),angle(lm[14],lm[16],lm[20])];}
- setStats(prev=>({hands:detected,pose:body?Boolean(body.landmarks.length):prev.pose,gesture,confidence,angles:angles.length?angles:prev.angles}));}frame.current=requestAnimationFrame(loop);}catch{stop();setStatus('Vision stopped. Restart camera.');}};frame.current=requestAnimationFrame(loop);
- }catch(error){stop();setStatus(error instanceof DOMException&&error.name==='NotAllowedError'?'Camera permission denied. Use pointer controls.':'Vision unavailable. Use pointer controls or retry.');}}
- function calibrate(){center.current=structuredClone(latest.current);controller.arms.forEach(a=>{a.target=[...a.end];});setStats(s=>({...s,gesture:'Neutral pose calibrated'}));}
- return <section className="panel vision"><div className="panel-heading"><span><ScanLine size={14}/> OPERATOR VISION</span><span className={active.current?'online':'muted'}>{status}</span></div><div className="camera"><video ref={video} muted playsInline/><canvas ref={canvas} width={640} height={480}/>{!active.current&&<div className="camera-placeholder"><Camera size={28}/><p>Your body. The controller.</p><button onClick={start}>Enable camera</button></div>}<span className="camera-tag">LOCAL PROCESSING</span></div><div className="vision-readout"><span className={stats.hands.includes('Left')?'online':''}>● LEFT</span><span className={stats.hands.includes('Right')?'online':''}>● RIGHT</span><span className={stats.pose?'online':''}>● POSE</span></div><div className="gesture">{stats.gesture}<small>{stats.confidence?`${Math.round(stats.confidence*100)}% handedness confidence`:'No video leaves your device'}</small></div>{stats.angles.length>0&&<div className="small muted">Human S / E / W: {stats.angles.map(n=>Math.round(n)+'°').join(' / ')}</div>}<div className="button-row"><button className="mini" onClick={calibrate} disabled={!active.current}><RefreshCw size={12}/> Calibrate hands</button><button className="mini" disabled={!stream.current} onClick={()=>{const c=document.createElement('canvas');c.width=video.current!.videoWidth;c.height=video.current!.videoHeight;c.getContext('2d')!.drawImage(video.current!,0,0);onSnapshot(c.toDataURL('image/jpeg',.85));}}>Snapshot</button><button className="icon-button" aria-label="Stop camera" onClick={stop}><VideoOff size={13}/></button></div></section>;
+import { useEffect, useRef, useState } from "react";
+import { Camera, ScanLine, RefreshCw, VideoOff } from "lucide-react";
+import type {
+  HandLandmarker,
+  PoseLandmarker,
+  NormalizedLandmark,
+} from "@mediapipe/tasks-vision";
+import { Controller, clamp } from "./robotics";
+type Stats = {
+  hands: string[];
+  pose: boolean;
+  gesture: string;
+  confidence: number;
+  angles: number[];
+};
+const edges = [
+  [0, 1],
+  [1, 2],
+  [2, 3],
+  [3, 4],
+  [0, 5],
+  [5, 6],
+  [6, 7],
+  [7, 8],
+  [5, 9],
+  [9, 10],
+  [10, 11],
+  [11, 12],
+  [9, 13],
+  [13, 14],
+  [14, 15],
+  [15, 16],
+  [13, 17],
+  [0, 17],
+  [17, 18],
+  [18, 19],
+  [19, 20],
+];
+export function Vision({
+  controller,
+  onSnapshot,
+}: {
+  controller: Controller;
+  onSnapshot: (s: string) => void;
+}) {
+  const video = useRef<HTMLVideoElement>(null),
+    canvas = useRef<HTMLCanvasElement>(null),
+    stream = useRef<MediaStream | null>(null),
+    hand = useRef<HandLandmarker | null>(null),
+    pose = useRef<PoseLandmarker | null>(null),
+    frame = useRef(0),
+    active = useRef(false),
+    generation = useRef(0),
+    center = useRef<Record<string, number[]>>({}),
+    latest = useRef<Record<string, number[]>>({}),
+    pinch = useRef<Record<string, boolean>>({});
+  const [status, setStatus] = useState("CAMERA OFF"),
+    [stats, setStats] = useState<Stats>({
+      hands: [],
+      pose: false,
+      gesture: "Awaiting operator",
+      confidence: 0,
+      angles: [],
+    });
+  function stop() {
+    generation.current++;
+    active.current = false;
+    cancelAnimationFrame(frame.current);
+    stream.current?.getTracks().forEach((t) => t.stop());
+    stream.current = null;
+    hand.current?.close();
+    pose.current?.close();
+    hand.current = null;
+    pose.current = null;
+    if (video.current) video.current.srcObject = null;
+    setStatus("CAMERA OFF");
+    setStats({
+      hands: [],
+      pose: false,
+      gesture: "Awaiting operator",
+      confidence: 0,
+      angles: [],
+    });
+    controller.arms.forEach((a) => {
+      a.target = [...a.end];
+      a.velocity = [0, 0, 0];
+    });
+  }
+  useEffect(
+    () => () => {
+      generation.current++;
+      active.current = false;
+      cancelAnimationFrame(frame.current);
+      stream.current?.getTracks().forEach((t) => t.stop());
+      hand.current?.close();
+      pose.current?.close();
+    },
+    [],
+  );
+  useEffect(() => {
+    if (active.current || stream.current) stop();
+    center.current = {};
+  }, [controller]);
+  async function start() {
+    if (active.current) return;
+    const token = ++generation.current;
+    setStatus("STARTING CAMERA");
+    let permissionTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const pending = navigator.mediaDevices.getUserMedia({
+        video: { width: 640, height: 480, facingMode: "user" },
+        audio: false,
+      });
+      pending
+        .then((media) => {
+          if (token !== generation.current)
+            media.getTracks().forEach((t) => t.stop());
+        })
+        .catch(() => {});
+      const media = await Promise.race([
+        pending,
+        new Promise<never>((_, reject) => {
+          permissionTimer = setTimeout(
+            () => reject(new Error("Camera permission timed out")),
+            15000,
+          );
+        }),
+      ]);
+      clearTimeout(permissionTimer);
+      if (token !== generation.current) {
+        media.getTracks().forEach((t) => t.stop());
+        return;
+      }
+      stream.current = media;
+      video.current!.srcObject = media;
+      await video.current!.play();
+      setStatus("LOADING VISION");
+      const { FilesetResolver, HandLandmarker, PoseLandmarker } =
+        await import("@mediapipe/tasks-vision");
+      const files = await FilesetResolver.forVisionTasks("/vision/wasm");
+      const h = await HandLandmarker.createFromOptions(files, {
+        baseOptions: {
+          modelAssetPath: "/vision/hand_landmarker.task",
+          delegate: "CPU",
+        },
+        runningMode: "VIDEO",
+        numHands: 2,
+        minHandDetectionConfidence: 0.55,
+        minTrackingConfidence: 0.55,
+      });
+      if (token !== generation.current) {
+        h.close();
+        return;
+      }
+      hand.current = h;
+      const p = await PoseLandmarker.createFromOptions(files, {
+        baseOptions: {
+          modelAssetPath: "/vision/pose_landmarker_lite.task",
+          delegate: "CPU",
+        },
+        runningMode: "VIDEO",
+        numPoses: 1,
+        minPoseDetectionConfidence: 0.55,
+      });
+      if (token !== generation.current) {
+        p.close();
+        return;
+      }
+      pose.current = p;
+      active.current = true;
+      setStatus("CV ONLINE");
+      let previous = 0,
+        iteration = 0,
+        lastSeen: Record<number, number> = {};
+      const loop = (now: number) => {
+        if (!active.current || !video.current) return;
+        try {
+          if (now - previous > 65 && video.current.readyState >= 2) {
+            previous = now;
+            const result = h.detectForVideo(video.current, now),
+              body =
+                iteration++ % 3 === 0
+                  ? p.detectForVideo(video.current, now)
+                  : null;
+            const ctx = canvas.current!.getContext("2d")!;
+            ctx.clearRect(0, 0, 640, 480);
+            ctx.strokeStyle = "#b4f277";
+            ctx.fillStyle = "#b4f277";
+            ctx.lineWidth = 2;
+            const detected: string[] = [];
+            let gesture = "Open palm to engage",
+              confidence = 0;
+            result.landmarks.forEach((landmarks, index) => {
+              const label = result.handedness[index][0].categoryName;
+              const side = label === "Left" ? -1 : 1;
+              detected.push(label);
+              confidence = Math.max(
+                confidence,
+                result.handedness[index][0].score,
+              );
+              const wrist = landmarks[0],
+                indexTip = landmarks[8],
+                thumb = landmarks[4];
+              const span = Math.hypot(
+                landmarks[5].x - landmarks[17].x,
+                landmarks[5].y - landmarks[17].y,
+              );
+              const ratio =
+                Math.hypot(indexTip.x - thumb.x, indexTip.y - thumb.y) /
+                Math.max(span, 0.02);
+              const wasPinching = Boolean(pinch.current[label]);
+              const closed = ratio < (wasPinching ? 0.6 : 0.4);
+              pinch.current[label] = closed;
+              latest.current[label] = [wrist.x, wrist.y, span];
+              const arm = controller.arms.find((a) => a.side === side)!;
+              if (!center.current[label])
+                center.current[label] = [wrist.x, wrist.y, span, ...arm.end];
+              const c = center.current[label];
+              const extended = [8, 12, 16, 20].filter(
+                (i) =>
+                  Math.hypot(
+                    landmarks[i].x - wrist.x,
+                    landmarks[i].y - wrist.y,
+                  ) >
+                  Math.hypot(
+                    landmarks[i - 2].x - wrist.x,
+                    landmarks[i - 2].y - wrist.y,
+                  ) *
+                    1.15,
+              ).length;
+              if (extended >= 3 || closed || wasPinching) {
+                const x = c[3] - (wrist.x - c[0]) * 1.6,
+                  y = c[4] - (wrist.y - c[1]) * 1.5,
+                  z = c[5] - (span - c[2]) * 3.4;
+                if (!controller.paused && !controller.running) {
+                  controller.setTarget(
+                    side,
+                    [
+                      clamp(x, -1, 1),
+                      clamp(y, 0.4, 1.9),
+                      clamp(z, -0.65, 0.55),
+                    ],
+                    closed,
+                  );
+                }
+                gesture = closed ? "PINCH · GRASP" : "OPEN PALM · FOLLOW";
+                lastSeen[side] = now;
+              }
+              for (const [a, b] of edges) {
+                ctx.beginPath();
+                ctx.moveTo(landmarks[a].x * 640, landmarks[a].y * 480);
+                ctx.lineTo(landmarks[b].x * 640, landmarks[b].y * 480);
+                ctx.stroke();
+              }
+              for (const point of landmarks) {
+                ctx.beginPath();
+                ctx.arc(point.x * 640, point.y * 480, 3, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            });
+            // Tracking loss freezes the arm; never continue an old unobserved target.
+            if (!controller.running)
+              for (const a of controller.arms)
+                if (now - (lastSeen[a.side] || 0) > 350) {
+                  a.target = [...a.end];
+                  a.velocity = [0, 0, 0];
+                }
+            let angles: number[] = [];
+            if (body?.landmarks[0]) {
+              const lm = body.landmarks[0];
+              ctx.strokeStyle = "#69b9df";
+              for (const [a, b] of [
+                [11, 13],
+                [13, 15],
+                [12, 14],
+                [14, 16],
+                [11, 12],
+                [11, 23],
+                [12, 24],
+                [23, 24],
+              ]) {
+                ctx.beginPath();
+                ctx.moveTo(lm[a].x * 640, lm[a].y * 480);
+                ctx.lineTo(lm[b].x * 640, lm[b].y * 480);
+                ctx.stroke();
+              }
+              const angle = (
+                a: NormalizedLandmark,
+                b: NormalizedLandmark,
+                c: NormalizedLandmark,
+              ) => {
+                const ux = a.x - b.x,
+                  uy = a.y - b.y,
+                  vx = c.x - b.x,
+                  vy = c.y - b.y;
+                return (
+                  (Math.acos(
+                    clamp(
+                      (ux * vx + uy * vy) /
+                        (Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1),
+                      -1,
+                      1,
+                    ),
+                  ) *
+                    180) /
+                  Math.PI
+                );
+              };
+              angles = [
+                angle(lm[24], lm[12], lm[14]),
+                angle(lm[12], lm[14], lm[16]),
+                angle(lm[14], lm[16], lm[20]),
+              ];
+            }
+            setStats((prev) => ({
+              hands: detected,
+              pose: body ? Boolean(body.landmarks.length) : prev.pose,
+              gesture,
+              confidence,
+              angles: angles.length ? angles : prev.angles,
+            }));
+          }
+          frame.current = requestAnimationFrame(loop);
+        } catch {
+          stop();
+          setStatus("Vision stopped. Restart camera.");
+        }
+      };
+      frame.current = requestAnimationFrame(loop);
+    } catch (error) {
+      clearTimeout(permissionTimer);
+      if (token !== generation.current) return;
+      stop();
+      setStatus(
+        error instanceof DOMException && error.name === "NotAllowedError"
+          ? "Camera permission denied. Use pointer controls."
+          : "Vision unavailable. Use pointer controls or retry.",
+      );
+    }
+  }
+  function calibrate() {
+    for (const [label, position] of Object.entries(latest.current)) {
+      const arm = controller.arms.find(
+        (a) => a.side === (label === "Left" ? -1 : 1),
+      )!;
+      center.current[label] = [...position, ...arm.end];
+    }
+    controller.arms.forEach((a) => {
+      a.target = [...a.end];
+    });
+    setStats((s) => ({ ...s, gesture: "Neutral pose calibrated" }));
+  }
+  return (
+    <section className="panel vision">
+      <div className="panel-heading">
+        <span>
+          <ScanLine size={14} /> OPERATOR VISION
+        </span>
+        <span className={active.current ? "online" : "muted"}>{status}</span>
+      </div>
+      <div className="camera">
+        <video ref={video} muted playsInline />
+        <canvas ref={canvas} width={640} height={480} />
+        {!active.current && (
+          <div className="camera-placeholder">
+            <Camera size={28} />
+            <p>Your body. The controller.</p>
+            <button onClick={start}>Enable camera</button>
+          </div>
+        )}
+        <span className="camera-tag">LOCAL PROCESSING</span>
+      </div>
+      <div className="vision-readout">
+        <span className={stats.hands.includes("Left") ? "online" : ""}>
+          ● LEFT
+        </span>
+        <span className={stats.hands.includes("Right") ? "online" : ""}>
+          ● RIGHT
+        </span>
+        <span className={stats.pose ? "online" : ""}>● POSE</span>
+      </div>
+      <div className="gesture">
+        {stats.gesture}
+        <small>
+          {stats.confidence
+            ? `${Math.round(stats.confidence * 100)}% handedness confidence`
+            : "No video leaves your device"}
+        </small>
+      </div>
+      {stats.angles.length > 0 && (
+        <div className="small muted">
+          Human S / E / W:{" "}
+          {stats.angles.map((n) => Math.round(n) + "°").join(" / ")}
+        </div>
+      )}
+      <div className="button-row">
+        <button className="mini" onClick={calibrate} disabled={!active.current}>
+          <RefreshCw size={12} /> Calibrate hands
+        </button>
+        <button className="mini" onClick={calibrate} disabled={!active.current}>
+          Recenter tracking
+        </button>
+        <button
+          className="mini"
+          disabled={!stream.current}
+          onClick={() => {
+            const c = document.createElement("canvas");
+            c.width = video.current!.videoWidth;
+            c.height = video.current!.videoHeight;
+            c.getContext("2d")!.drawImage(video.current!, 0, 0);
+            onSnapshot(c.toDataURL("image/jpeg", 0.85));
+          }}
+        >
+          Snapshot
+        </button>
+        <button className="icon-button" aria-label="Stop camera" onClick={stop}>
+          <VideoOff size={13} />
+        </button>
+      </div>
+    </section>
+  );
 }
