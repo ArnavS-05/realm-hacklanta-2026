@@ -297,6 +297,31 @@ export class GestureController {
       this.sampleCalibration(now);
       return;
     }
+    if (
+      this.robot.running ||
+      this.robot.paused ||
+      Math.abs(this.robot.rotationTarget - this.robot.bodyYaw) > 0.001
+    ) {
+      for (const t of this.tracks) {
+        this.freeze(t, !t.stable);
+        t.closed = this.robot.arms.find((a) => a.side === t.side)!.closed;
+        t.candidateSince = now;
+      }
+      this.message = this.robot.paused
+        ? "GLOBAL STOP"
+        : this.robot.running
+          ? "AI ASSIST · MANUAL CONTROL ON HOLD"
+          : "BODY TURN · ARM HOLD";
+      return;
+    }
+    if (
+      this.tracks.every((t) => t.stable && t.gesture.startsWith("POINT")) &&
+      this.tracks[0].gesture !== this.tracks[1].gesture
+    ) {
+      this.tracks.forEach((t) => this.freeze(t));
+      this.message = "ARM HOLD · Conflicting turn gestures";
+      return;
+    }
     const both = this.tracks.every(
       (t) => t.stable && now - t.lastSeen < 100 && features(t.landmarks).open,
     );
@@ -380,7 +405,7 @@ export class GestureController {
         if (enabled)
           this.robot.requestRotation(t.state === "ROTATE_LEFT" ? -1 : 1);
         this.message = t.state.replaceAll("_", " ");
-        continue;
+        return;
       }
       if (t.gesture === "RELAXED" && age > C.confirmMs) {
         this.freeze(t);

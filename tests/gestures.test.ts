@@ -45,6 +45,20 @@ function feed(
 ) {
   for (let t = start; t <= end; t += 50) g.process(o, t);
 }
+test("AI execution owns arm targets and pause prevents gesture grip changes", () => {
+  const { g, robot } = setup();
+  feed(g, [sample()], 100, 500);
+  robot.running = true;
+  robot.arms[1].target = [0.45, 1.2, 0.1];
+  feed(g, [sample("pinch")], 550, 1100);
+  assert.deepEqual(robot.arms[1].target, [0.45, 1.2, 0.1]);
+  assert.equal(robot.arms[1].closed, false);
+  robot.running = false;
+  robot.paused = true;
+  feed(g, [sample("pinch")], 1150, 1800);
+  assert.equal(robot.arms[1].closed, false);
+  assert.equal(g.message, "GLOBAL STOP");
+});
 test("fixtures represent distinct open, pinch, fist and point geometry", () => {
   assert.equal(features(sample().landmarks).open, true);
   assert.ok(features(sample("pinch").landmarks).pinch < CONTROL.pinchClose);
