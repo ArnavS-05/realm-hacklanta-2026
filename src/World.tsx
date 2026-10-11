@@ -82,72 +82,80 @@ function Joint({
 }
 function Robot({ c }: { c: Controller }) {
   const ref = useRef<THREE.Group>(null);
-  const dummy = useRef(0);
   useFrame(() => {
-    dummy.current++;
+    if (ref.current) {
+      ref.current.rotation.y = c.bodyYaw;
+      ref.current.position.set(
+        -Math.sin(c.bodyYaw) * 0.58,
+        0,
+        0.58 - Math.cos(c.bodyYaw) * 0.58,
+      );
+    }
   });
   return (
-    <group ref={ref}>
-      <mesh position={[0, 1.17, 0.58]} castShadow>
-        <boxGeometry args={[0.46, 0.48, 0.24]} />
-        <meshStandardMaterial
-          color="#d6dedc"
-          metalness={0.55}
-          roughness={0.28}
-        />
-      </mesh>
-      <mesh position={[0, 1.28, 0.445]}>
-        <boxGeometry args={[0.24, 0.065, 0.025]} />
-        <meshStandardMaterial
-          color="#b9f77b"
-          emissive="#b9f77b"
-          emissiveIntensity={0.6}
-        />
-      </mesh>
-      <Joint p={[0, 1.48, 0.58]} r={0.095} />
-      <mesh position={[0, 1.66, 0.56]} castShadow>
-        <boxGeometry args={[0.27, 0.26, 0.23]} />
-        <meshStandardMaterial
-          color="#d6dedc"
-          metalness={0.6}
-          roughness={0.25}
-        />
-      </mesh>
-      <mesh position={[0, 1.69, 0.438]}>
-        <boxGeometry args={[0.22, 0.062, 0.022]} />
-        <meshStandardMaterial color="#0a141a" />
-      </mesh>
-      <mesh position={[0, 1.69, 0.424]}>
-        <boxGeometry args={[0.12, 0.011, 0.006]} />
-        <meshStandardMaterial
-          color="#b4f477"
-          emissive="#b4f477"
-          emissiveIntensity={2}
-        />
-      </mesh>
-      <mesh position={[0, 0.85, 0.58]}>
-        <boxGeometry args={[0.34, 0.19, 0.23]} />
-        <meshStandardMaterial color="#37444b" metalness={0.6} />
-      </mesh>
-      {[-1, 1].map((s) => (
-        <group key={s}>
-          <Link
-            a={[s * 0.13, 0.84, 0.58]}
-            b={[s * 0.16, 0.46, 0.59]}
-            r={0.095}
+    <group>
+      <group ref={ref}>
+        <mesh position={[0, 1.17, 0.58]} castShadow>
+          <boxGeometry args={[0.46, 0.48, 0.24]} />
+          <meshStandardMaterial
+            color="#d6dedc"
+            metalness={0.55}
+            roughness={0.28}
           />
-          <Joint p={[s * 0.16, 0.46, 0.59]} r={0.09} />
-          <Link
-            a={[s * 0.16, 0.46, 0.59]}
-            b={[s * 0.17, 0.12, 0.56]}
-            r={0.075}
+        </mesh>
+        <mesh position={[0, 1.28, 0.445]}>
+          <boxGeometry args={[0.24, 0.065, 0.025]} />
+          <meshStandardMaterial
+            color="#b9f77b"
+            emissive="#b9f77b"
+            emissiveIntensity={0.6}
           />
-          <mesh position={[s * 0.17, 0.065, 0.49]} castShadow>
-            <boxGeometry args={[0.19, 0.12, 0.32]} />
-            <meshStandardMaterial color="#b6c1c1" metalness={0.4} />
-          </mesh>
-        </group>
-      ))}
+        </mesh>
+        <Joint p={[0, 1.48, 0.58]} r={0.095} />
+        <mesh position={[0, 1.66, 0.56]} castShadow>
+          <boxGeometry args={[0.27, 0.26, 0.23]} />
+          <meshStandardMaterial
+            color="#d6dedc"
+            metalness={0.6}
+            roughness={0.25}
+          />
+        </mesh>
+        <mesh position={[0, 1.69, 0.438]}>
+          <boxGeometry args={[0.22, 0.062, 0.022]} />
+          <meshStandardMaterial color="#0a141a" />
+        </mesh>
+        <mesh position={[0, 1.69, 0.424]}>
+          <boxGeometry args={[0.12, 0.011, 0.006]} />
+          <meshStandardMaterial
+            color="#b4f477"
+            emissive="#b4f477"
+            emissiveIntensity={2}
+          />
+        </mesh>
+        <mesh position={[0, 0.85, 0.58]}>
+          <boxGeometry args={[0.34, 0.19, 0.23]} />
+          <meshStandardMaterial color="#37444b" metalness={0.6} />
+        </mesh>
+        {[-1, 1].map((s) => (
+          <group key={s}>
+            <Link
+              a={[s * 0.13, 0.84, 0.58]}
+              b={[s * 0.16, 0.46, 0.59]}
+              r={0.095}
+            />
+            <Joint p={[s * 0.16, 0.46, 0.59]} r={0.09} />
+            <Link
+              a={[s * 0.16, 0.46, 0.59]}
+              b={[s * 0.17, 0.12, 0.56]}
+              r={0.075}
+            />
+            <mesh position={[s * 0.17, 0.065, 0.49]} castShadow>
+              <boxGeometry args={[0.19, 0.12, 0.32]} />
+              <meshStandardMaterial color="#b6c1c1" metalness={0.4} />
+            </mesh>
+          </group>
+        ))}
+      </group>
       {c.arms.map((a) => (
         <ArmView key={a.side} c={c} side={a.side} />
       ))}
@@ -165,7 +173,7 @@ function ArmView({ c, side }: { c: Controller; side: number }) {
     marker = useRef<THREE.Mesh>(null),
     f1 = useRef<THREE.Mesh>(null),
     f2 = useRef<THREE.Mesh>(null);
-  const s = shoulder(side);
+  const shoulderMesh = useRef<THREE.Group>(null);
   const update = (mesh: THREE.Mesh | null, a: V3, b: V3) => {
     if (!mesh) return;
     const delta = new THREE.Vector3(...b).sub(new THREE.Vector3(...a));
@@ -180,6 +188,8 @@ function ArmView({ c, side }: { c: Controller; side: number }) {
   };
   useFrame(() => {
     const a = c.arms.find((a) => a.side === side)!;
+    const s = c.origin(side);
+    shoulderMesh.current?.position.set(...s);
     update(actualUpper.current, s, a.elbow);
     update(actualLower.current, a.elbow, a.end);
     elbow.current?.position.set(...a.elbow);
@@ -188,7 +198,7 @@ function ArmView({ c, side }: { c: Controller; side: number }) {
       f1.current.position.x = a.closed ? -0.028 : -0.068;
       f2.current.position.x = a.closed ? 0.028 : 0.068;
     }
-    const ghost = forward(inverse(a.target, s).joints, s);
+    const ghost = c.pose(c.solve(a.target, side).joints, side);
     update(ghostUpper.current, s, ghost.elbow);
     update(ghostLower.current, ghost.elbow, ghost.end);
     marker.current?.position.set(...a.target);
@@ -198,7 +208,9 @@ function ArmView({ c, side }: { c: Controller; side: number }) {
   });
   return (
     <group ref={group}>
-      <Joint p={s} />
+      <group ref={shoulderMesh}>
+        <Joint p={[0, 0, 0]} />
+      </group>
       {[actualUpper, actualLower].map((ref, i) => (
         <mesh key={i} ref={ref} castShadow>
           <cylinderGeometry args={[0.05, 0.062, 1, 14]} />
@@ -365,7 +377,21 @@ function ObjectBody({
 }
 function Tick({ c, onUpdate }: { c: Controller; onUpdate: () => void }) {
   let elapsed = useRef(0);
-  useFrame((_, dt) => {
+  useFrame(({ camera }, dt) => {
+    const right = new THREE.Vector3().setFromMatrixColumn(
+      camera.matrixWorld,
+      0,
+    );
+    right.y = 0;
+    right.normalize();
+    const depth = new THREE.Vector3().setFromMatrixColumn(
+      camera.matrixWorld,
+      2,
+    );
+    depth.y = 0;
+    depth.normalize();
+    c.controlRight = [right.x, 0, right.z];
+    c.controlDepth = [depth.x, 0, depth.z];
     c.tick(dt);
     elapsed.current += dt;
     if (elapsed.current > 0.1) {

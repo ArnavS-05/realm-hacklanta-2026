@@ -1,4 +1,5 @@
 import type { Scene, V3, Plan, SceneObject } from "./schema";
+import { CONTROL } from "./controlConfig";
 export const add = (a: V3, b: V3): V3 => [
   a[0] + b[0],
   a[1] + b[1],
@@ -26,11 +27,16 @@ export const LIMITS = {
   pitch: [-1.3, 2.4],
   elbow: [0.12, 2.75],
 };
-export function shoulder(side: number): V3 {
-  return [side * 0.29, 1.38, 0.58];
+export function shoulder(side: number, bodyYaw = 0): V3 {
+  return [
+    side * 0.29 * Math.cos(bodyYaw),
+    1.38,
+    0.58 - side * 0.29 * Math.sin(bodyYaw),
+  ];
 }
-export function forward(j: V3, s: V3) {
-  const [yaw, pitch, elbow] = j;
+export function forward(j: V3, s: V3, bodyYaw = 0) {
+  const [, pitch, elbow] = j;
+  const yaw = j[0] - bodyYaw;
   const a: V3 = [
     Math.sin(yaw) * Math.cos(pitch),
     Math.sin(pitch),
@@ -44,7 +50,11 @@ export function forward(j: V3, s: V3) {
   const joint = add(s, mul(a, LIMITS.upper));
   return { elbow: joint, end: add(joint, mul(b, LIMITS.fore)) };
 }
-export function inverse(target: V3, s: V3): { joints: V3; status: string } {
+export function inverse(
+  target: V3,
+  s: V3,
+  bodyYaw = 0,
+): { joints: V3; status: string } {
   const d = sub(target, s),
     r = length(d),
     h = Math.hypot(d[0], d[2]);
@@ -57,7 +67,10 @@ export function inverse(target: V3, s: V3): { joints: V3; status: string } {
     ),
   );
   const joints: V3 = [
-    Math.atan2(d[0], -d[2]),
+    Math.atan2(
+      Math.sin(Math.atan2(d[0], -d[2]) + bodyYaw),
+      Math.cos(Math.atan2(d[0], -d[2]) + bodyYaw),
+    ),
     Math.atan2(d[1], h) +
       Math.atan2(
         LIMITS.fore * Math.sin(elbow),
@@ -149,6 +162,11 @@ export type Metrics = {
   ideal: number;
 };
 export class Controller {
+  bodyYaw = 0;
+  rotationTarget = 0;
+  rotationSpeed = 0;
+  controlRight: V3 = [-0.79, 0, -0.61];
+  controlDepth: V3 = [0.61, 0, -0.79];
   arms: Arm[];
   scene: Scene;
   held: string | null = null;
@@ -198,6 +216,73 @@ export class Controller {
     for (const o of scene.objects)
       this.positions[o.id] = objectPosition(o, scene);
   }
+  origin(side: number) {
+    return shoulder(side, this.bodyYaw);
+  }
+  solve(target: V3, side: number) {
+    return inverse(target, this.origin(side), this.bodyYaw);
+  }
+  pose(joints: V3, side: number) {
+    return forward(joints, this.origin(side), this.bodyYaw);
+  }
+  requestRotation(direction: number) {
+    if (this.held || this.running || this.paused) {
+      this.message = "Release the object before turning";
+      return;
+    }
+    this.rotationTarget = clamp(
+      this.rotationTarget + direction * CONTROL.rotationStep,
+      -CONTROL.rotationLimit,
+      CONTROL.rotationLimit,
+    );
+  }
+  private turn(dt: number) {
+    const error = this.rotationTarget - this.bodyYaw;
+    if (Math.abs(error) < 0.0001) {
+      this.rotationSpeed = 0;
+      return;
+    }
+    const desired =
+      Math.sign(error) *
+      Math.min(
+        CONTROL.rotationVelocity,
+        Math.sqrt(2 * CONTROL.rotationAcceleration * Math.abs(error)),
+      );
+    this.rotationSpeed += clamp(
+      desired - this.rotationSpeed,
+      -CONTROL.rotationAcceleration * dt,
+      CONTROL.rotationAcceleration * dt,
+    );
+    const change =
+        Math.sign(error) *
+        Math.min(Math.abs(error), Math.abs(this.rotationSpeed) * dt),
+      old = this.bodyYaw;
+    this.bodyYaw += change;
+    const solutions = this.arms.map((a) => this.solve(a.end, a.side));
+    if (
+      solutions.some(
+        (s, i) =>
+          s.status !== "ACCEPTED" ||
+          !this.validPose(s.joints, this.arms[i].side),
+      )
+    ) {
+      this.bodyYaw = old;
+      this.rotationTarget = old;
+      this.rotationSpeed = 0;
+      this.message = "ROTATION BLOCKED · COLLISION / REACH";
+      this.metrics.collisions++;
+      return;
+    }
+    for (let i = 0; i < 2; i++) {
+      const a = this.arms[i];
+      a.joints = solutions[i].joints;
+      const p = this.pose(a.joints, a.side);
+      a.elbow = p.elbow;
+      a.end = p.end;
+      a.target = [...a.end];
+      a.velocity = [0, 0, 0];
+    }
+  }
   setTarget(side: number, target: V3, closed: boolean) {
     if (this.running) {
       this.metrics.corrections++;
@@ -209,6 +294,8 @@ export class Controller {
     arm.closed = closed;
   }
   stop() {
+    this.rotationTarget = this.bodyYaw;
+    this.rotationSpeed = 0;
     this.running = false;
     this.paused = true;
     for (const a of this.arms) {
@@ -246,8 +333,8 @@ export class Controller {
     this.arms.forEach((a) => (a.closed = false));
   }
   validPose(joints: V3, side: number) {
-    const s = shoulder(side),
-      p = forward(joints, s);
+    const s = this.origin(side),
+      p = forward(joints, s, this.bodyYaw);
     if (p.end[1] < 0.08) return false;
     for (const b of sceneBounds(this.scene))
       if (segmentHits(s, p.elbow, b) || segmentHits(p.elbow, p.end, b))
@@ -275,6 +362,7 @@ export class Controller {
   tick(dt: number) {
     dt = clamp(dt, 0, 0.04);
     if (this.paused) return;
+    this.turn(dt);
     if (this.original && !this.complete) this.metrics.elapsed += dt;
     if (this.running) this.advancePlan(dt);
     for (const a of this.arms) {
@@ -285,7 +373,7 @@ export class Controller {
         this.settle = 0;
         this.message = "Object released · checking placement";
       }
-      const solution = inverse(a.target, shoulder(a.side));
+      const solution = this.solve(a.target, a.side);
       a.status = solution.status;
       if (a.status === "ACCEPTED" && !this.validPose(solution.joints, a.side))
         a.status = "COLLISION RISK";
@@ -319,7 +407,7 @@ export class Controller {
         );
       }) as V3;
       let next = a.joints.map((n, i) => n + vel[i] * dt) as V3;
-      let pose = forward(next, shoulder(a.side));
+      let pose = this.pose(next, a.side);
       const speed = distance(previous, pose.end) / Math.max(dt, 0.001);
       const cap = Math.min(
         LIMITS.maxVelocity,
@@ -336,7 +424,7 @@ export class Controller {
             (n, j) => n + vel[j] * dt * factor,
           ) as V3;
           if (
-            distance(previous, forward(candidate, shoulder(a.side)).end) /
+            distance(previous, this.pose(candidate, a.side).end) /
               Math.max(dt, 0.001) <=
             cap
           )
@@ -345,7 +433,7 @@ export class Controller {
         }
         vel = mul(vel, low);
         next = a.joints.map((n, i) => n + vel[i] * dt) as V3;
-        pose = forward(next, shoulder(a.side));
+        pose = this.pose(next, a.side);
       }
       // Sweep the whole articulated path, not just the final hand location.
       let clear = true;
@@ -376,13 +464,19 @@ export class Controller {
         (1.2 + mass) * 9.81 * Math.max(0, a.end[1] - previous[1]) + 2 * path;
       a.lastStatus = "ACCEPTED";
       if (a.closed && !this.held) {
-        const obj = this.scene.objects.find(
-          (o) =>
-            o.interactable &&
-            !this.scene.obstacles.includes(o.id) &&
-            distance(this.positions[o.id], a.end) <
-              Math.max(0.085, o.approximateScale.x * 0.65),
-        );
+        const obj = this.scene.objects
+          .filter(
+            (o) =>
+              o.interactable &&
+              !this.scene.obstacles.includes(o.id) &&
+              distance(this.positions[o.id], a.end) <
+                Math.max(0.085, o.approximateScale.x * 0.65),
+          )
+          .sort(
+            (left, right) =>
+              distance(this.positions[left.id], a.end) -
+              distance(this.positions[right.id], a.end),
+          )[0];
         if (obj) {
           this.held = obj.id;
           this.heldSide = a.side;

@@ -78,6 +78,7 @@ export default function App() {
     [selected, setSelected] = useState("bottle_01"),
     [view, setView] = useState("twin"),
     [image, setImage] = useState(""),
+    [draftImage, setDraftImage] = useState(""),
     [source, setSource] = useState("DEMO SCENE"),
     [capture, setCapture] = useState(false),
     [busy, setBusy] = useState(""),
@@ -114,6 +115,11 @@ export default function App() {
       if (event.code === "Space") {
         event.preventDefault();
         controller.stop();
+        update();
+      }
+      if (event.code === "KeyA" || event.code === "KeyD") {
+        event.preventDefault();
+        controller.requestRotation(event.code === "KeyA" ? -1 : 1);
         update();
       }
       if (
@@ -164,6 +170,7 @@ export default function App() {
     currentRequest.current++;
     setBusy("");
     setImage("");
+    setDraftImage("");
     loadScene(demoScene, "DEMO SCENE");
   }
   function reset(all = false) {
@@ -183,6 +190,8 @@ export default function App() {
   }
   async function upload(f: File | undefined) {
     if (!f) return;
+    const token = ++currentRequest.current;
+    setBusy("");
     if (!["image/jpeg", "image/png", "image/webp"].includes(f.type)) {
       setNotice("Choose a JPEG, PNG or WebP image.");
       return;
@@ -201,7 +210,8 @@ export default function App() {
       cv.width = im.width * scale;
       cv.height = im.height * scale;
       cv.getContext("2d")!.drawImage(im, 0, 0, cv.width, cv.height);
-      setImage(cv.toDataURL("image/jpeg", 0.86));
+      if (token !== currentRequest.current) return;
+      setDraftImage(cv.toDataURL("image/jpeg", 0.86));
       setCapture(true);
       setNotice("");
     } catch {
@@ -212,12 +222,14 @@ export default function App() {
   }
   async function analyze() {
     const token = ++currentRequest.current;
+    const analyzedImage = draftImage;
     setBusy("Analyzing environment");
     try {
       const result = validateScene(
-        SceneSchema.parse(await api("analyze-scene", { image })),
+        SceneSchema.parse(await api("analyze-scene", { image: analyzedImage })),
       );
       if (token !== currentRequest.current) return;
+      setImage(analyzedImage);
       loadScene(result, "GEMINI SCENE");
       setView("split");
     } catch (e) {
@@ -575,7 +587,9 @@ export default function App() {
               <Vision
                 controller={controller}
                 onSnapshot={(s) => {
-                  setImage(s);
+                  currentRequest.current++;
+                  setBusy("");
+                  setDraftImage(s);
                   setCapture(true);
                 }}
               />
@@ -609,9 +623,9 @@ export default function App() {
                   <>
                     <h2>Reach. Pinch. Become.</h2>
                     <p className="muted small">
-                      Open your palm to move. Pinch to grasp.
+                      Hold an open palm to engage. Pinch to grasp.
                       <br />
-                      Move closer to the camera to reach forward.
+                      Fist to hold. Two palms to recenter.
                     </p>
                     <div className="mission-levels">
                       {[
@@ -775,6 +789,13 @@ export default function App() {
                     <dd>{metrics.energy.toFixed(2)} J</dd>
                   </div>
                   <div>
+                    <dt>Body heading</dt>
+                    <dd>
+                      {Math.round((controller.bodyYaw * 180) / Math.PI)}° · A /
+                      D to turn
+                    </dd>
+                  </div>
+                  <div>
                     <dt>Reach envelope</dt>
                     <dd>{LIMITS.reach} m</dd>
                   </div>
@@ -850,7 +871,9 @@ export default function App() {
               <section className="pointer-panel">
                 <div>
                   <strong>Right-arm controls</strong>
-                  <p>Arrow keys: X/Y · Q/E: depth · G: gripper · Space: stop</p>
+                  <p>
+                    Arrows: X/Y · Q/E: depth · G: grip · A/D: turn · Space: stop
+                  </p>
                 </div>
                 {(["X", "Y", "Z"] as const).map((label, i) => (
                   <label key={label}>
@@ -910,7 +933,11 @@ export default function App() {
             >
               <button
                 className="close"
-                onClick={() => setCapture(false)}
+                onClick={() => {
+                  currentRequest.current++;
+                  setBusy("");
+                  setCapture(false);
+                }}
                 aria-label="Close capture"
               >
                 <X size={19} />
@@ -926,8 +953,8 @@ export default function App() {
                   upload(e.dataTransfer.files[0]);
                 }}
               >
-                {image ? (
-                  <img src={image} alt="Workspace to analyze" />
+                {draftImage ? (
+                  <img src={draftImage} alt="Workspace to analyze" />
                 ) : (
                   <>
                     <Scan size={42} />
@@ -937,13 +964,13 @@ export default function App() {
                 )}
                 <button onClick={() => file.current?.click()}>
                   <Upload size={14} />
-                  {image ? "Choose another photo" : "Choose a photograph"}
+                  {draftImage ? "Choose another photo" : "Choose a photograph"}
                 </button>
               </div>
               <div className="capture-actions">
                 <button
                   className="primary"
-                  disabled={!image || Boolean(busy)}
+                  disabled={!draftImage || Boolean(busy)}
                   onClick={analyze}
                 >
                   <Sparkles size={15} />
@@ -1015,7 +1042,8 @@ export default function App() {
               Space stops motion. Tracking loss freezes arms. Red ghosts
               indicate rejected targets. This is a simplified tabletop
               simulation, not a certified robot controller. Navigation is
-              orbital viewing; the humanoid base stays fixed.
+              orbital viewing; body rotation is bounded to ±45° and the base
+              does not walk.
             </p>
             <button className="primary" onClick={() => setHelp(false)}>
               Let's build a realm <ArrowRight size={15} />

@@ -583,6 +583,123 @@ h1 em {
   gap: 4px;
   margin-top: 13px;
 }
+.camera-status {
+  font-size: 9px;
+  color: #8fa5af;
+  line-height: 1.5;
+  margin: 8px 0;
+  overflow-wrap: anywhere;
+}
+.hand-scores {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0;
+}
+.hand-scores > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  border-bottom: 1px solid #273840;
+  padding-bottom: 9px;
+  gap: 5px;
+}
+.hand-scores span {
+  font-size: 8px;
+  letter-spacing: 0.7px;
+  color: #8fa4af;
+}
+.hand-scores strong {
+  font-size: 12px;
+  font-weight: 500;
+}
+.hand-scores small {
+  font-size: 7px;
+  color: #6f8793;
+  grid-column: 1/-1;
+}
+.gesture-status {
+  background: #1c2c23;
+  border: 1px solid #344b32;
+  border-radius: 4px;
+  color: #bddca6;
+  padding: 8px;
+  font-size: 9px;
+  line-height: 1.5;
+  margin: 9px 0;
+}
+.gesture-values {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 12px 0;
+}
+.gesture-values > span {
+  font-size: 7px;
+  letter-spacing: 0.7px;
+  color: #6b8492;
+}
+.gesture-values strong {
+  display: block;
+  font-size: 9px;
+  letter-spacing: 0;
+  font-weight: 400;
+  color: #c1d2d8;
+  margin-top: 4px;
+}
+.calibration-callout {
+  font-size: 10px;
+  line-height: 1.6;
+  background: #1e2c35;
+  border: 1px solid #405568;
+  padding: 10px;
+  border-radius: 5px;
+  color: #bfdaef;
+}
+.calibration-callout button {
+  margin-left: 8px;
+}
+.gesture-help-toggle {
+  font-size: 9px;
+  border: 0;
+  background: none;
+  padding: 9px 0;
+  color: #8ca2ae;
+  display: flex;
+  justify-content: space-between;
+  width: 100%;
+}
+.gesture-guide {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  border-top: 1px solid #2a3b43;
+  padding-top: 12px;
+}
+.gesture-guide > div {
+  display: flex;
+  gap: 7px;
+  align-items: center;
+  color: #b4ed79;
+}
+.gesture-guide strong {
+  font-weight: 500;
+  font-size: 8px;
+  color: #cadbe0;
+  display: block;
+}
+.gesture-guide small {
+  font-size: 8px;
+  color: #718c99;
+  display: block;
+  margin-top: 3px;
+}
+.gesture-guide p {
+  grid-column: 1/-1;
+  font-size: 8px;
+  line-height: 1.7;
+  color: #6a8290;
+  margin: 0;
+}
 .mini {
   font-size: 9px;
   padding: 6px 7px;

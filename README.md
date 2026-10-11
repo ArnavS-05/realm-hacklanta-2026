@@ -20,7 +20,7 @@ A photograph becomes the workspace. Your hands become the interface. High-level 
 
 Choose **Explore the demo** on the landing page. The bundled workbench has a bottle, cup and obstacle. In Mission Control choose **AI assist → Load offline demo plan → Execute validated plan** to see the entire manipulation loop without a key. This fixed plan is labeled OFFLINE SCRIPT and is never presented as a Gemini result.
 
-For manual operation: enable the camera, hold an open palm at chest height and click **Calibrate hands**. Move sideways/up/down; moving toward the camera increases forward reach. Pinch thumb and index finger to grasp and separate them to release. Tracking loss freezes targets and keeps a held object secured. Space stops motion; Resume re-enables control. Pointer/keyboard fallback: arrows change X/Y, Q/E changes depth, G toggles the gripper. The base is stationary.
+For manual operation: enable the camera, click **Calibrate hands**, then follow open palm → pinch → relax. Move sideways/up/down; moving toward the camera increases forward reach. Pinch thumb and index finger to grasp and separate them to release. Tracking loss freezes targets and keeps a held object secured. Space stops motion; Resume re-enables control. Pointer/keyboard fallback: arrows change X/Y, Q/E changes depth, G toggles the gripper. A/D provides bounded body rotation; the base does not walk.
 
 ## How It Works
 
@@ -50,6 +50,8 @@ flowchart LR
 ```
 
 ## Computer Vision
+
+The precise gesture update adds a confirmed state machine, time-aware smoothing, a target dead zone, confidence hysteresis, stable hand association, pinch/release cooldowns, fist hold, bounded pointing rotation, two-palm recenter and a three-step calibration. See [Gesture control](docs/GESTURE_CONTROL.md) for thresholds, behavior and test scope. The default high-level model is [Gemini Robotics ER 2](https://ai.google.dev/gemini-api/docs/robotics-overview).
 
 Two-hand landmarks, handedness scores, pinch hysteresis and body pose run in the browser. Palm-width changes provide a coarse relative depth control. Shoulder/elbow/wrist angles are shown when body landmarks are present. Body pose is used for operator telemetry; hand landmarks drive the arms. Models and WASM are bundled in `public/vision`; no continuous frames go to Gemini. A snapshot leaves the browser only when the user clicks Analyze. Camera requires localhost or HTTPS and user permission. Model initialization uses CPU for portability, with throttled inference.
 
@@ -107,7 +109,7 @@ Edit the local `.env`:
 
 ```dotenv
 GEMINI_API_KEY=your_local_secret
-GEMINI_MODEL=gemini-2.5-flash
+GEMINI_MODEL=gemini-robotics-er-2-preview
 ```
 
 Never use a `VITE_` prefix for credentials. `.env` is ignored before the first commit. Set a model available to your Google project if the default is unavailable. Restart the API after editing `.env`. Missing, revoked, invalid or exhausted credentials stop only the Gemini operation; the demo remains usable. Project metadata or a key display name cannot authenticate API requests.
@@ -146,3 +148,4 @@ Arnav Sawant. Built with AI-assisted implementation; review your event's AI disc
 ## Built at Hacklanta 2026
 
 Prepared for Hacklanta 2026. See `docs/SUBMISSION.md` for Devpost copy, `docs/DEMO_SCRIPT.md` for the 90-second walkthrough, and `docs/VERIFICATION.md` for tested behavior and remaining checks.
+

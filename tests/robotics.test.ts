@@ -51,6 +51,16 @@ test("swept segment collision catches a thin obstacle between endpoints", () => 
     true,
   );
 });
+test("gripper release still works when a new arm target is invalid", () => {
+  const c = new Controller(demoScene);
+  c.held = "bottle_01";
+  c.heldSide = 1;
+  c.setTarget(1, [8, 8, 8], false);
+  c.tick(1 / 60);
+  assert.equal(c.held, null);
+  assert.equal(c.released, "bottle_01");
+  assert.equal(c.arms[1].status, "OUTSIDE WORKSPACE");
+});
 test("demo plan reaches, grasps, carries, releases and completes", () => {
   const c = new Controller(demoScene);
   c.start(demoPlan);

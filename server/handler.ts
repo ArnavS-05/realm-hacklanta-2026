@@ -92,7 +92,7 @@ export async function handleOperation(operation: string, body: unknown) {
             },
           ];
     const result = await ai.models.generateContent({
-      model: process.env.GEMINI_MODEL || "gemini-2.5-flash",
+      model: process.env.GEMINI_MODEL || "gemini-robotics-er-2-preview",
       contents,
       config: {
         responseMimeType: "application/json",

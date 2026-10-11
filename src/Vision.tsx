@@ -1,18 +1,22 @@
-import { useEffect, useRef, useState } from "react";
-import { Camera, ScanLine, RefreshCw, VideoOff } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  Camera,
+  ScanLine,
+  RefreshCw,
+  VideoOff,
+  Hand,
+  Pointer,
+  Grab,
+  ChevronsLeftRight,
+} from "lucide-react";
 import type {
   HandLandmarker,
   PoseLandmarker,
   NormalizedLandmark,
 } from "@mediapipe/tasks-vision";
 import { Controller, clamp } from "./robotics";
-type Stats = {
-  hands: string[];
-  pose: boolean;
-  gesture: string;
-  confidence: number;
-  angles: number[];
-};
+import { GestureController, type Observation } from "./gestures";
+import { CONTROL } from "./controlConfig";
 const edges = [
   [0, 1],
   [1, 2],
@@ -49,22 +53,18 @@ export function Vision({
     hand = useRef<HandLandmarker | null>(null),
     pose = useRef<PoseLandmarker | null>(null),
     frame = useRef(0),
-    active = useRef(false),
     generation = useRef(0),
-    center = useRef<Record<string, number[]>>({}),
-    latest = useRef<Record<string, number[]>>({}),
-    pinch = useRef<Record<string, boolean>>({});
+    active = useRef(false),
+    starting = useRef(false);
+  const engine = useMemo(() => new GestureController(controller), [controller]);
   const [status, setStatus] = useState("CAMERA OFF"),
-    [stats, setStats] = useState<Stats>({
-      hands: [],
-      pose: false,
-      gesture: "Awaiting operator",
-      confidence: 0,
-      angles: [],
-    });
-  function stop() {
+    [, refresh] = useState(0),
+    [body, setBody] = useState({ tracked: false, angles: [] as number[] }),
+    [guide, setGuide] = useState(false);
+  function release() {
     generation.current++;
     active.current = false;
+    starting.current = false;
     cancelAnimationFrame(frame.current);
     stream.current?.getTracks().forEach((t) => t.stop());
     stream.current = null;
@@ -73,60 +73,45 @@ export function Vision({
     hand.current = null;
     pose.current = null;
     if (video.current) video.current.srcObject = null;
-    setStatus("CAMERA OFF");
-    setStats({
-      hands: [],
-      pose: false,
-      gesture: "Awaiting operator",
-      confidence: 0,
-      angles: [],
-    });
-    controller.arms.forEach((a) => {
-      a.target = [...a.end];
-      a.velocity = [0, 0, 0];
-    });
+    engine.tracks.forEach((t) => engine.freeze(t, true));
   }
-  useEffect(
-    () => () => {
-      generation.current++;
-      active.current = false;
-      cancelAnimationFrame(frame.current);
-      stream.current?.getTracks().forEach((t) => t.stop());
-      hand.current?.close();
-      pose.current?.close();
-    },
-    [],
-  );
+  function stop() {
+    release();
+    setStatus("CAMERA OFF");
+    setBody({ tracked: false, angles: [] });
+    refresh((n) => n + 1);
+  }
   useEffect(() => {
-    if (active.current || stream.current) stop();
-    center.current = {};
+    setStatus("CAMERA OFF");
+    return release;
   }, [controller]);
   async function start() {
-    if (active.current) return;
+    if (active.current || starting.current) return;
+    starting.current = true;
     const token = ++generation.current;
     setStatus("STARTING CAMERA");
-    let permissionTimer: ReturnType<typeof setTimeout> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       const pending = navigator.mediaDevices.getUserMedia({
         video: { width: 640, height: 480, facingMode: "user" },
         audio: false,
       });
       pending
-        .then((media) => {
+        .then((s) => {
           if (token !== generation.current)
-            media.getTracks().forEach((t) => t.stop());
+            s.getTracks().forEach((t) => t.stop());
         })
         .catch(() => {});
       const media = await Promise.race([
         pending,
         new Promise<never>((_, reject) => {
-          permissionTimer = setTimeout(
-            () => reject(new Error("Camera permission timed out")),
+          timer = setTimeout(
+            () => reject(Error("Camera permission timed out")),
             15000,
           );
         }),
       ]);
-      clearTimeout(permissionTimer);
+      clearTimeout(timer);
       if (token !== generation.current) {
         media.getTracks().forEach((t) => t.stop());
         return;
@@ -145,8 +130,9 @@ export function Vision({
         },
         runningMode: "VIDEO",
         numHands: 2,
-        minHandDetectionConfidence: 0.55,
-        minTrackingConfidence: 0.55,
+        minHandDetectionConfidence: 0.7,
+        minHandPresenceConfidence: 0.7,
+        minTrackingConfidence: 0.65,
       });
       if (token !== generation.current) {
         h.close();
@@ -160,7 +146,9 @@ export function Vision({
         },
         runningMode: "VIDEO",
         numPoses: 1,
-        minPoseDetectionConfidence: 0.55,
+        minPoseDetectionConfidence: 0.7,
+        minPosePresenceConfidence: 0.7,
+        minTrackingConfidence: 0.65,
       });
       if (token !== generation.current) {
         p.close();
@@ -168,136 +156,47 @@ export function Vision({
       }
       pose.current = p;
       active.current = true;
+      starting.current = false;
       setStatus("CV ONLINE");
       let previous = 0,
         iteration = 0,
-        lastSeen: Record<number, number> = {};
+        bodyLandmarks: NormalizedLandmark[] = [];
       const loop = (now: number) => {
         if (!active.current || !video.current) return;
         try {
-          if (now - previous > 65 && video.current.readyState >= 2) {
+          if (now - previous >= 50 && video.current.readyState >= 2) {
             previous = now;
-            const result = h.detectForVideo(video.current, now),
-              body =
-                iteration++ % 3 === 0
-                  ? p.detectForVideo(video.current, now)
-                  : null;
-            const ctx = canvas.current!.getContext("2d")!;
-            ctx.clearRect(0, 0, 640, 480);
-            ctx.strokeStyle = "#b4f277";
-            ctx.fillStyle = "#b4f277";
-            ctx.lineWidth = 2;
-            const detected: string[] = [];
-            let gesture = "Open palm to engage",
-              confidence = 0;
-            result.landmarks.forEach((landmarks, index) => {
-              const label = result.handedness[index][0].categoryName;
-              const side = label === "Left" ? -1 : 1;
-              detected.push(label);
-              confidence = Math.max(
-                confidence,
-                result.handedness[index][0].score,
+            const result = h.detectForVideo(video.current, now);
+            const observations: Observation[] = result.landmarks.map(
+              (landmarks, i) => ({
+                landmarks,
+                label: result.handedness[i][0].categoryName as "Left" | "Right",
+                confidence: result.handedness[i][0].score,
+              }),
+            );
+            engine.process(observations, now);
+            if (iteration++ % 3 === 0) {
+              const b = p.detectForVideo(video.current, now),
+                lm = b.landmarks[0];
+              const tracked = Boolean(
+                lm &&
+                [11, 12, 13, 14, 15, 16].every(
+                  (i) => (lm[i].visibility ?? 0) >= CONTROL.poseVisibility,
+                ),
               );
-              const wrist = landmarks[0],
-                indexTip = landmarks[8],
-                thumb = landmarks[4];
-              const span = Math.hypot(
-                landmarks[5].x - landmarks[17].x,
-                landmarks[5].y - landmarks[17].y,
-              );
-              const ratio =
-                Math.hypot(indexTip.x - thumb.x, indexTip.y - thumb.y) /
-                Math.max(span, 0.02);
-              const wasPinching = Boolean(pinch.current[label]);
-              const closed = ratio < (wasPinching ? 0.6 : 0.4);
-              pinch.current[label] = closed;
-              latest.current[label] = [wrist.x, wrist.y, span];
-              const arm = controller.arms.find((a) => a.side === side)!;
-              if (!center.current[label])
-                center.current[label] = [wrist.x, wrist.y, span, ...arm.end];
-              const c = center.current[label];
-              const extended = [8, 12, 16, 20].filter(
-                (i) =>
-                  Math.hypot(
-                    landmarks[i].x - wrist.x,
-                    landmarks[i].y - wrist.y,
-                  ) >
-                  Math.hypot(
-                    landmarks[i - 2].x - wrist.x,
-                    landmarks[i - 2].y - wrist.y,
-                  ) *
-                    1.15,
-              ).length;
-              if (extended >= 3 || closed || wasPinching) {
-                const x = c[3] - (wrist.x - c[0]) * 1.6,
-                  y = c[4] - (wrist.y - c[1]) * 1.5,
-                  z = c[5] - (span - c[2]) * 3.4;
-                if (!controller.paused && !controller.running) {
-                  controller.setTarget(
-                    side,
-                    [
-                      clamp(x, -1, 1),
-                      clamp(y, 0.4, 1.9),
-                      clamp(z, -0.65, 0.55),
-                    ],
-                    closed,
-                  );
-                }
-                gesture = closed ? "PINCH · GRASP" : "OPEN PALM · FOLLOW";
-                lastSeen[side] = now;
-              }
-              for (const [a, b] of edges) {
-                ctx.beginPath();
-                ctx.moveTo(landmarks[a].x * 640, landmarks[a].y * 480);
-                ctx.lineTo(landmarks[b].x * 640, landmarks[b].y * 480);
-                ctx.stroke();
-              }
-              for (const point of landmarks) {
-                ctx.beginPath();
-                ctx.arc(point.x * 640, point.y * 480, 3, 0, Math.PI * 2);
-                ctx.fill();
-              }
-            });
-            // Tracking loss freezes the arm; never continue an old unobserved target.
-            if (!controller.running)
-              for (const a of controller.arms)
-                if (now - (lastSeen[a.side] || 0) > 350) {
-                  a.target = [...a.end];
-                  a.velocity = [0, 0, 0];
-                }
-            let angles: number[] = [];
-            if (body?.landmarks[0]) {
-              const lm = body.landmarks[0];
-              ctx.strokeStyle = "#69b9df";
-              for (const [a, b] of [
-                [11, 13],
-                [13, 15],
-                [12, 14],
-                [14, 16],
-                [11, 12],
-                [11, 23],
-                [12, 24],
-                [23, 24],
-              ]) {
-                ctx.beginPath();
-                ctx.moveTo(lm[a].x * 640, lm[a].y * 480);
-                ctx.lineTo(lm[b].x * 640, lm[b].y * 480);
-                ctx.stroke();
-              }
+              bodyLandmarks = tracked ? lm : [];
               const angle = (
                 a: NormalizedLandmark,
                 b: NormalizedLandmark,
                 c: NormalizedLandmark,
               ) => {
-                const ux = a.x - b.x,
-                  uy = a.y - b.y,
-                  vx = c.x - b.x,
-                  vy = c.y - b.y;
+                const u = [a.x - b.x, a.y - b.y, a.z - b.z],
+                  v = [c.x - b.x, c.y - b.y, c.z - b.z];
                 return (
                   (Math.acos(
                     clamp(
-                      (ux * vx + uy * vy) /
-                        (Math.hypot(ux, uy) * Math.hypot(vx, vy) || 1),
+                      u.reduce((n, x, i) => n + x * v[i], 0) /
+                        (Math.hypot(...u) * Math.hypot(...v) || 1),
                       -1,
                       1,
                     ),
@@ -306,103 +205,190 @@ export function Vision({
                   Math.PI
                 );
               };
-              angles = [
-                angle(lm[24], lm[12], lm[14]),
-                angle(lm[12], lm[14], lm[16]),
-                angle(lm[14], lm[16], lm[20]),
-              ];
+              setBody({
+                tracked,
+                angles: tracked
+                  ? [
+                      angle(lm[24], lm[12], lm[14]),
+                      angle(lm[12], lm[14], lm[16]),
+                      angle(lm[14], lm[16], lm[20]),
+                    ]
+                  : [],
+              });
             }
-            setStats((prev) => ({
-              hands: detected,
-              pose: body ? Boolean(body.landmarks.length) : prev.pose,
-              gesture,
-              confidence,
-              angles: angles.length ? angles : prev.angles,
-            }));
+            const ctx = canvas.current!.getContext("2d")!;
+            ctx.clearRect(0, 0, 640, 480);
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "#6ea3bd";
+            for (const [a, b] of [
+              [11, 13],
+              [13, 15],
+              [12, 14],
+              [14, 16],
+              [11, 12],
+              [11, 23],
+              [12, 24],
+            ]) {
+              if (bodyLandmarks.length) {
+                ctx.beginPath();
+                ctx.moveTo(bodyLandmarks[a].x * 640, bodyLandmarks[a].y * 480);
+                ctx.lineTo(bodyLandmarks[b].x * 640, bodyLandmarks[b].y * 480);
+                ctx.stroke();
+              }
+            }
+            for (const t of engine.tracks) {
+              if (!t.stable || now - t.lastSeen > 100) continue;
+              ctx.strokeStyle = t.state === "HOLD" ? "#f5b87b" : "#b4ed79";
+              ctx.fillStyle = ctx.strokeStyle;
+              for (const [a, b] of edges) {
+                ctx.beginPath();
+                ctx.moveTo(t.landmarks[a].x * 640, t.landmarks[a].y * 480);
+                ctx.lineTo(t.landmarks[b].x * 640, t.landmarks[b].y * 480);
+                ctx.stroke();
+              }
+              for (const pt of t.landmarks) {
+                ctx.beginPath();
+                ctx.arc(pt.x * 640, pt.y * 480, 2.5, 0, Math.PI * 2);
+                ctx.fill();
+              }
+            }
+            refresh((n) => n + 1);
           }
           frame.current = requestAnimationFrame(loop);
         } catch {
           stop();
-          setStatus("Vision stopped. Restart camera.");
+          setStatus("Vision stopped · restart camera");
         }
       };
       frame.current = requestAnimationFrame(loop);
     } catch (error) {
-      clearTimeout(permissionTimer);
+      clearTimeout(timer);
       if (token !== generation.current) return;
       stop();
       setStatus(
         error instanceof DOMException && error.name === "NotAllowedError"
-          ? "Camera permission denied. Use pointer controls."
-          : "Vision unavailable. Use pointer controls or retry.",
+          ? "Camera permission denied · use pointer controls"
+          : "Camera unavailable · check permission or use pointer controls",
       );
     }
   }
-  function calibrate() {
-    for (const [label, position] of Object.entries(latest.current)) {
-      const arm = controller.arms.find(
-        (a) => a.side === (label === "Left" ? -1 : 1),
-      )!;
-      center.current[label] = [...position, ...arm.end];
-    }
-    controller.arms.forEach((a) => {
-      a.target = [...a.end];
-    });
-    setStats((s) => ({ ...s, gesture: "Neutral pose calibrated" }));
-  }
+  const focused =
+    engine.tracks.find((t) => t.state === "GRIPPING") ||
+    engine.tracks.find((t) => t.stable) ||
+    engine.tracks[1];
   return (
     <section className="panel vision">
       <div className="panel-heading">
         <span>
           <ScanLine size={14} /> OPERATOR VISION
         </span>
-        <span className={active.current ? "online" : "muted"}>{status}</span>
+        <span className={active.current ? "online" : "muted"}>
+          {active.current ? "CV ONLINE" : "LOCAL VISION"}
+        </span>
       </div>
       <div className="camera">
         <video ref={video} muted playsInline />
         <canvas ref={canvas} width={640} height={480} />
         {!active.current && (
           <div className="camera-placeholder">
-            <Camera size={28} />
+            <Camera size={25} />
             <p>Your body. The controller.</p>
-            <button onClick={start}>Enable camera</button>
+            <button onClick={start} disabled={starting.current}>
+              {starting.current ? "Starting…" : "Enable camera"}
+            </button>
           </div>
         )}
-        <span className="camera-tag">LOCAL PROCESSING</span>
+        <span className="camera-tag">MIRRORED · LOCAL PROCESSING</span>
       </div>
-      <div className="vision-readout">
-        <span className={stats.hands.includes("Left") ? "online" : ""}>
-          ● LEFT
+      {!active.current && (
+        <div className="camera-status" role="status">
+          {status}
+        </div>
+      )}
+      <div className="hand-scores">
+        {engine.tracks.map((t) => (
+          <div key={t.side}>
+            <span>{t.label.toUpperCase()} HAND</span>
+            <strong className={t.stable ? "online" : ""}>
+              {t.confidence ? Math.round(t.confidence * 100) + "%" : "—"}
+            </strong>
+            <small>
+              {t.stable ? t.state.replaceAll("_", " ") : "NOT TRACKED"}
+            </small>
+          </div>
+        ))}
+      </div>
+      <div className="gesture-status" role="status">
+        {active.current ? engine.message : "Open palm → move → pinch → release"}
+      </div>
+      <div className="gesture-values">
+        <span>
+          GESTURE<strong>{focused.gesture}</strong>
         </span>
-        <span className={stats.hands.includes("Right") ? "online" : ""}>
-          ● RIGHT
+        <span>
+          CONTROL STATE<strong>{focused.state.replaceAll("_", " ")}</strong>
         </span>
-        <span className={stats.pose ? "online" : ""}>● POSE</span>
+        <span>
+          PINCH
+          <strong>{focused.stable ? focused.pinch.toFixed(2) : "—"}</strong>
+        </span>
+        <span>
+          TRACKING
+          <strong className={focused.stable ? "online" : ""}>
+            {focused.stable
+              ? focused.clamped
+                ? "WORKSPACE CLAMPED"
+                : "STABLE"
+              : "UNCERTAIN"}
+          </strong>
+        </span>
       </div>
-      <div className="gesture">
-        {stats.gesture}
-        <small>
-          {stats.confidence
-            ? `${Math.round(stats.confidence * 100)}% handedness confidence`
-            : "No video leaves your device"}
-        </small>
-      </div>
-      {stats.angles.length > 0 && (
+      {engine.calibrationMessage && (
+        <div className="calibration-callout">
+          {engine.calibrationMessage}
+          {engine.calibration && (
+            <button
+              className="mini"
+              onClick={() => {
+                engine.calibration = null;
+                engine.calibrationMessage = "";
+                refresh((n) => n + 1);
+              }}
+            >
+              Cancel
+            </button>
+          )}
+        </div>
+      )}
+      {body.tracked && (
         <div className="small muted">
-          Human S / E / W:{" "}
-          {stats.angles.map((n) => Math.round(n) + "°").join(" / ")}
+          Body pose · {body.angles.map((n) => Math.round(n) + "°").join(" / ")}
         </div>
       )}
       <div className="button-row">
-        <button className="mini" onClick={calibrate} disabled={!active.current}>
-          <RefreshCw size={12} /> Calibrate hands
-        </button>
-        <button className="mini" onClick={calibrate} disabled={!active.current}>
-          Recenter tracking
+        <button
+          className="mini"
+          onClick={() => {
+            engine.beginCalibration();
+            refresh((n) => n + 1);
+          }}
+          disabled={!active.current}
+        >
+          <RefreshCw size={11} /> Calibrate hands
         </button>
         <button
           className="mini"
-          disabled={!stream.current}
+          onClick={() => {
+            engine.recenter(performance.now());
+            refresh((n) => n + 1);
+          }}
+          disabled={!active.current}
+        >
+          Recenter
+        </button>
+        <button
+          className="mini"
+          disabled={!stream.current || starting.current}
           onClick={() => {
             const c = document.createElement("canvas");
             c.width = video.current!.videoWidth;
@@ -417,6 +403,41 @@ export function Vision({
           <VideoOff size={13} />
         </button>
       </div>
+      <button
+        className="gesture-help-toggle"
+        aria-expanded={guide}
+        onClick={() => setGuide(!guide)}
+      >
+        {guide ? "Hide" : "Show"} gesture guide <Hand size={12} />
+      </button>
+      {guide && (
+        <div className="gesture-guide">
+          {[
+            [Hand, "OPEN PALM", "Hold 0.3 s to engage"],
+            [Pointer, "PINCH", "Thumb + index to grab"],
+            [ChevronsLeftRight, "RELEASE", "Separate to drop"],
+            [Grab, "FIST", "Immediate arm hold"],
+            [Pointer, "POINT", "Hold to turn 15°"],
+            [Hand, "TWO PALMS", "Hold to recenter"],
+          ].map(([Icon, label, detail]) => {
+            const Glyph = Icon as typeof Hand;
+            return (
+              <div key={label as string}>
+                <Glyph size={17} />
+                <span>
+                  <strong>{label as string}</strong>
+                  <small>{detail as string}</small>
+                </span>
+              </div>
+            );
+          })}
+          <p>
+            Keep fingers visible. Pinch with the other fingers loose. Hand
+            percentages are identity confidence; model presence thresholds and
+            landmark geometry also gate motion.
+          </p>
+        </div>
+      )}
     </section>
   );
 }
